@@ -20,7 +20,14 @@
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 class NetworkFetcher {
 public:
@@ -118,6 +125,25 @@ public:
         // (or future LibWeb subset) would plug in here.
         std::string html = BrowserEngine::load(url);
 
+#ifdef _WIN32
+        char tmpdir[MAX_PATH];
+        char tmpfile[MAX_PATH];
+        if (GetTempPathA(MAX_PATH, tmpdir) && GetTempFileNameA(tmpdir, "lb", 0, tmpfile)) {
+            std::string path = std::string(tmpfile) + ".html";
+            if (MoveFileA(tmpfile, path.c_str())) {
+                std::ofstream ofs(path);
+                ofs << html;
+                ofs.close();
+                view_->load(path.c_str());
+                DeleteFileA(path.c_str());
+            } else {
+                DeleteFileA(tmpfile);
+                view_->value(html.c_str());
+            }
+        } else {
+            view_->value(html.c_str());
+        }
+#else
         char tmpl[] = "/tmp/lbXXXXXX";
         int fd = mkstemp(tmpl);
         if (fd >= 0) {
@@ -132,6 +158,7 @@ public:
         } else {
             view_->value(html.c_str());
         }
+#endif
 
         // history
         if (hist_idx_ >= 0 && hist_idx_ + 1 < (int)hist_.size())
