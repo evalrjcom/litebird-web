@@ -39,19 +39,81 @@ jobs:
     - name: Install dependencies (Windows)
       if: runner.os == 'Windows'
       run: |
-        vcpkg install fltk curl --triplet x64-windows
+        vcpkg install fltk curl --triplet x64-windows-static
 
     - name: Build (Windows)
       if: runner.os == 'Windows'
       shell: cmd
       run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-        cl /EHsc /std:c++17 /MD litebird.cpp ^
-          /I"%VCPKG_INSTALLATION_ROOT%\installed\x64-windows\include" ^
-          /link /LIBPATH:"%VCPKG_INSTALLATION_ROOT%\installed\x64-windows\lib" ^
-          fltk.lib fltk_forms.lib fltk_images.lib fltk_gl.lib curl.lib ^
-          ws2_32.lib comctl32.lib gdi32.lib user32.lib shell32.lib ole32.lib uuid.lib
-        ren litebird.exe litebird-windows.exe
+        cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="%VCPKG_INSTALLATION_ROOT%\scripts\buildsystems\vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static
+        if errorlevel 1 exit /b 1
+        cmake --build build --config Release
+        if errorlevel 1 exit /b 1
+        move /Y build\Release\litebird.exe litebird-windows.exe
+
+    - name: Check Windows binary is static
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if (-not $vs) { throw "Visual Studio not found via vswhere" }
+        $dumpbin = Get-ChildItem -Path "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
+          Where-Object { $_.FullName -match '\\Hostx64\\x64\\dumpbin.exe$' } |
+          Sort-Object FullName -Descending |
+          Select-Object -First 1
+        if (-not $dumpbin) { throw "dumpbin.exe not found" }
+
+        $exe = "litebird-windows.exe"
+        if (-not (Test-Path $exe)) { throw "Missing $exe" }
+        $info = Get-Item $exe
+        Write-Host ("EXE_SIZE_BYTES={0}" -f $info.Length)
+        Write-Host ("EXE_SIZE_MIB={0:N2}" -f ($info.Length / 1MB))
+        Write-Host "Using dumpbin: $($dumpbin.FullName)"
+
+        $out = & $dumpbin.FullName /dependents $exe 2>&1 | Out-String
+        Write-Host $out
+
+        $allowed = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        @(
+          'KERNEL32.dll','KERNELBASE.dll','USER32.dll','GDI32.dll','GDI32FULL.dll',
+          'WS2_32.dll','CRYPT32.dll','CRYPTBASE.dll','CRYPTSP.dll','NORMALIZ.dll',
+          'WLDAP32.dll','bcrypt.dll','bcryptPrimitives.dll','ADVAPI32.dll',
+          'SHELL32.dll','OLE32.dll','OLEAUT32.dll','COMCTL32.dll','COMDLG32.dll',
+          'IMM32.dll','UXTHEME.dll','WINMM.dll','WINMMBASE.dll','VERSION.dll',
+          'SHLWAPI.dll','NTDLL.dll','RPCRT4.dll','SECHOST.dll','IPHLPAPI.dll',
+          'SECUR32.dll','SSPICLI.dll','NSI.dll','DNSAPI.dll','MSWSOCK.dll',
+          'WTSAPI32.dll','USERENV.dll','PROFAPI.dll','WINTRUST.dll','MSASN1.dll',
+          'SETUPAPI.dll','CFGMGR32.dll','POWRPROF.dll','DEVOBJ.dll','dwmapi.dll',
+          'SHCORE.dll','oleacc.dll','WINSPOOL.DRV','OPENGL32.dll','GLU32.dll',
+          'gdiplus.dll','USP10.dll','MSIMG32.dll'
+        ) | ForEach-Object { [void]$allowed.Add($_) }
+
+        $deps = [System.Collections.Generic.List[string]]::new()
+        $in = $false
+        foreach ($line in ($out -split "`r?`n")) {
+          if ($line -match 'Image has the following dependencies:') { $in = $true; continue }
+          if (-not $in) { continue }
+          if ($line -match 'Image has the following delay load dependencies' -or $line -match '^\s*Summary') { break }
+          $name = $line.Trim()
+          if ([string]::IsNullOrWhiteSpace($name)) {
+            if ($deps.Count -gt 0) { break }
+            continue
+          }
+          if ($name -match '(?i)\.(dll|drv)$') { $deps.Add($name) }
+        }
+
+        Write-Host "Parsed dependents:"
+        $deps | ForEach-Object { Write-Host ("  " + $_) }
+        if ($deps.Count -eq 0) { throw "dumpbin reported no dependents; the parse likely failed" }
+
+        $bad = @($deps | Where-Object { -not $allowed.Contains($_) })
+        if ($bad.Count -gt 0) {
+          Write-Host "Non-system DLLs (not allowed for a static exe):"
+          $bad | ForEach-Object { Write-Host ("  " + $_) }
+          throw "litebird-windows.exe is not fully static"
+        }
+        Write-Host "Static check passed: only Windows system DLLs are listed."
 
     # ---------- Artifacts ----------
     - name: Upload Linux binary
