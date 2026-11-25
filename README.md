@@ -26,6 +26,11 @@ This is **not** a full modern browser. It is intentionally minimal so it can boo
 - Intercepts http(s) links for in-browser navigation
 - Status bar
 - Error pages for network/HTTP failures
+<!-- CHANGED (audit): document the behaviour added by the audit -->
+- Non-blocking page loads (the window stays responsive; a new navigation cancels the old one)
+- HTTPS certificates are verified (`--insecure` disables this, at your own risk)
+- Relative links, `<base href>`, redirects and `#fragments` are resolved correctly
+- Latin-1 / Windows-1252 pages are converted to UTF-8; plain-text pages are shown as text
 
 ## Building
 
@@ -34,9 +39,10 @@ This is **not** a full modern browser. It is intentionally minimal so it can boo
 sudo apt-get update
 sudo apt-get install -y build-essential libfltk1.3-dev libcurl4-openssl-dev
 
-cd litebird
+cd litebird-web   # FIX (audit): the repository folder is litebird-web
 make
-./litebird
+make test         # unit tests for the URL/HTML helpers
+./litebird [--insecure] [URL]
 ```
 
 Static linking is possible but increases size; for the ISO we prefer dynamic and install the shared libraries.
@@ -72,7 +78,7 @@ sudo chroot litebird-root
 
 # Inside chroot
 apt-get update
-apt-get install -y fltk1.3 libcurl4 xorg openbox xterm
+apt-get install -y libfltk1.3 libcurl4 ca-certificates xorg openbox xterm   # FIX (audit): binary package is libfltk1.3; ca-certificates needed for HTTPS (enable 'universe')
 # Copy litebird binary and create desktop autostart
 # Configure openbox to start litebird
 # exit

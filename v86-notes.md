@@ -8,7 +8,7 @@ sudo apt-get install gcc-multilib g++-multilib libfltk1.3-dev:i386 libcurl4-open
 
 # Simple multiarch attempt (may need more setup)
 g++ -m32 -std=c++17 -O2 -o litebird32 litebird.cpp \
-    `fltk-config --cxxflags --ldflags` -lcurl
+    `fltk-config --cxxflags --ldflags` -lcurl -pthread   # FIX (audit): -pthread needed for the worker thread
 ```
 
 If multiarch is painful, build inside an i386 chroot or use the live ISO itself to compile.
