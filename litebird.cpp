@@ -11,6 +11,11 @@
 // "// FIX:" (bug/security/edge case) or "// CHANGED:" (behaviour/efficiency)
 // comment. See AUDIT.md for the full changelog.
 
+// FIX (Windows CI): <windows.h> (pulled in by FLTK/curl headers) defines min/max
+// macros that break std::min/std::max; NOMINMAX turns them off.
+#if defined(_WIN32) && !defined(NOMINMAX)
+#define NOMINMAX
+#endif
 #include <FL/Fl.H>
 #include <FL/Fl_Window.H>
 #include <FL/Fl_Group.H>      // CHANGED: toolbar group so buttons don't stretch on resize
@@ -1613,16 +1618,16 @@ private:
                 it.ww = 320;
             } else if (f.type == "select") {
                 auto* ch = new Fl_Choice(0, 0, 10, kRowH);
-                int sel = 0, maxw = 60;
+                int sel = 0, widest = 60;
                 for (size_t k = 0; k < f.options.size(); k++) {
                     ch->add(menu_escape(f.options[k].label).c_str());
                     if (f.options[k].selected) sel = (int)k;
-                    maxw = std::max(maxw, (int)fl_width(f.options[k].label.c_str()) + 30);
+                    widest = std::max(widest, (int)fl_width(f.options[k].label.c_str()) + 30);
                 }
                 if (!f.options.empty()) ch->value(sel);
                 ch->textsize(12);
                 it.w = ch;
-                it.ww = std::min(260, maxw);
+                it.ww = std::min(260, widest);
             } else if (f.type == "checkbox" || f.type == "radio") {
                 Fl_Button* b = f.type == "radio" ? static_cast<Fl_Button*>(new Fl_Round_Button(0, 0, 10, kRowH))
                                                  : static_cast<Fl_Button*>(new Fl_Check_Button(0, 0, 10, kRowH));

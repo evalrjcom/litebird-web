@@ -42,7 +42,8 @@ endif()
 
 if(WIN32)
   # curl headers need this when the library is static.
-  target_compile_definitions(litebird PRIVATE CURL_STATICLIB)
+  # FIX: NOMINMAX keeps <windows.h> from defining min/max macros.
+  target_compile_definitions(litebird PRIVATE CURL_STATICLIB NOMINMAX _CRT_SECURE_NO_WARNINGS)
   # Schannel / WinHTTP-adjacent system libs used by static libcurl on Windows.
   target_link_libraries(litebird PRIVATE
     ws2_32
