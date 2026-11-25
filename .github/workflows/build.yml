@@ -45,22 +45,11 @@ jobs:
       if: runner.os == 'Windows'
       shell: cmd
       run: |
-        set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
-        for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
-        if not defined VSINSTALL (
-          echo Could not locate Visual Studio via vswhere
-          exit /b 1
-        )
-        call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat"
+        cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="%VCPKG_INSTALLATION_ROOT%\scripts\buildsystems\vcpkg.cmake"
         if errorlevel 1 exit /b 1
-        cl /EHsc /std:c++17 /MD litebird.cpp ^
-          /I"%VCPKG_INSTALLATION_ROOT%\installed\x64-windows\include" ^
-          /link /LIBPATH:"%VCPKG_INSTALLATION_ROOT%\installed\x64-windows\lib" ^
-          fltk.lib fltk_forms.lib fltk_images.lib fltk_gl.lib curl.lib ^
-          ws2_32.lib comctl32.lib gdi32.lib user32.lib shell32.lib ole32.lib uuid.lib ^
-          oleaut32.lib advapi32.lib comdlg32.lib opengl32.lib glu32.lib crypt32.lib wldap32.lib normaliz.lib
+        cmake --build build --config Release
         if errorlevel 1 exit /b 1
-        ren litebird.exe litebird-windows.exe
+        move /Y build\Release\litebird.exe litebird-windows.exe
 
     # ---------- Artifacts ----------
     - name: Upload Linux binary
