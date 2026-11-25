@@ -147,3 +147,77 @@ References are written as `original line(s) → corrected line(s)`.
 8. **Persistent bookmarks and history** in `~/.config/litebird/`, plus a `litebird://history` internal page.
 9. **Basic GET forms.** Parse `<form method=get>` into native FLTK inputs, which is enough for search boxes and wikis.
 10. **Tabs.** An `Fl_Tabs` container with a per-tab history and worker, reusing the new `BrowserUI` navigation core.
+
+---
+
+## Follow-up after Windows testing of PR #2
+
+Testing the PR #2 build on Windows turned up three problems:
+1. On `https://lite.duckduckgo.com/lite`, only the heading rendered. Fl_Help_View drops `<form>` and `<input>`, so the search box and button never appeared.
+2. Clicking a DuckDuckGo result (`https://duckduckgo.com/l/?uddg=…&rut=…`) showed a blank page.
+3. The user asked for dark mode.
+
+### Changes (marked `// FEATURE:` / `// FIX:` / `// CHANGED:` in `litebird.cpp`)
+- **[High] Web forms.**
+  - **Parsing.** `prepare_html()` (`:619`) turns every `<form>`, `<input>`, `<textarea>`, `<select>`/`<option>` and `<button>` into plain data (`Form`/`FormField`). Controls outside any `<form>` go into one implicit GET form.
+  - **In the page.** Each control is replaced by an inline placeholder link, such as `[q: ____]` or `[ Search ]`. Clicking a field placeholder focuses its widget, and clicking a submit placeholder submits the form.
+  - **Form bar.** `build_panel()` (`:1582`) builds real FLTK widgets in a scrollable bar under the toolbar, at most 3 rows with a scrollbar beyond that:
+    - `Fl_Input` and `Fl_Secret_Input`
+    - `Fl_Multiline_Input`
+    - `Fl_Choice`
+    - `Fl_Check_Button` and `Fl_Round_Button` (radio exclusivity is per form and name)
+    - `Fl_Button`
+  - **Submitting.** `submit_form()` (`:1701`) collects the values the way the HTML spec does: the submitter's name and value, checked boxes only, and the selected option value. Enter in a text field submits through the form's first submit button.
+  - **Encoding.** GET replaces the action URL's query with `form_urlencode()` (`:558`). POST sends `application/x-www-form-urlencoded` through `CURLOPT_COPYPOSTFIELDS`.
+  - **Why this design.** Fl_Help_View can't embed widgets or report where elements are laid out, so overlaying widgets on the page isn't possible. A form bar plus inline placeholders always works, keeps the page readable, and still shows where each control sits.
+- **[High] DuckDuckGo result links.**
+  - `unwrap_redirector()` (`:831`) decodes `uddg` from `duckduckgo.com/l/` and its subdomains, and LiteBird opens the target directly.
+  - It is only applied to DDG hosts and only for http(s) targets, so `javascript:` and look-alike hosts are refused.
+  - The interstitial page DDG serves contains a `<meta refresh>` plus `window.location.replace(...)`. It now also works through the generic redirect handling below.
+- **[Medium] `<meta http-equiv="refresh">`.** `parse_meta_refresh()` (`:845`) follows a refresh with a delay of 5 s or less. A plain "reload" refresh is ignored.
+- **[Medium] Simple JavaScript redirects.**
+  - `find_js_redirect()` (`:884`) recognises `location[.href] = "…"` and `location.replace/assign("…")` inside `<script>` blocks, and undoes `\/` and `\u0026` escapes.
+  - It only acts on near-empty pages (fewer than 200 visible characters), so ordinary pages with scripts are left alone.
+  - `BrowserEngine::load()` (`:1111`) follows at most 5 of these soft redirects and stops on self-refresh. Only http(s) targets are followed.
+- **[Medium] Dark mode.**
+  - A toolbar button and **Ctrl+D** toggle it. Shortcuts are caught with `Fl::event_dispatch` (`:1783`), so `Fl_Input`'s own Ctrl+D binding doesn't swallow the key.
+  - `apply_theme_colors()` sets `Fl::background`, `background2`, `foreground` and the selection colour, plus the help view's background and text colours.
+  - `apply_dark_theme()` (`:931`) injects `<body bgcolor text link>` (links are `#8ab4f8`) and strips `bgcolor` and `<font color>` so pages stay readable.
+  - The choice is saved by `save_dark_setting()`, read back by `load_dark_setting()` (`:1214`):
+    - Windows: `%APPDATA%\LiteBird\config.ini`, using wide-char APIs.
+    - Linux: `$XDG_CONFIG_HOME/litebird/config`, defaulting to `~/.config/litebird/config`.
+  - `--dark` and `--light` override the saved choice for one session.
+- **[Medium] History page cache.** `traverse()` (`:1520`):
+  - Back and Forward reuse the cached page, so they are instant and a POST search is never re-submitted.
+  - The cache covers the 10 entries on each side of the current one.
+  - A POST result is always a new history entry, even when its URL is unchanged (DDG Lite posts back to `/lite/`).
+- **[Low] Smaller changes:**
+  - Keyboard shortcuts: Ctrl+L, F5 or Ctrl+R, Alt+Left/Right.
+  - `CURLOPT_AUTOREFERER` is on.
+  - The User-Agent is now `LiteBird/1.2`.
+  - The widget scheme is `gtk+`.
+  - A `.gitignore` was added.
+
+### Tests
+- `tests/test_helpers.cpp` adds checks for:
+  - uddg decoding, including rejecting look-alike hosts, wrong paths and `javascript:`
+  - meta-refresh parsing: quoted URLs, entities, plain self-refresh, and `name=` versus `http-equiv=`
+  - JS redirect patterns, including that a comparison is not treated as a redirect
+  - form URL-encoding, including UTF-8
+  - extraction of a DDG Lite-like form with every control type
+  - the dark-theme rewrite
+- **All tests pass.**
+- **GUI tests (Xvfb + xdotool, in ASan+UBSan and TSan builds, no errors).** DuckDuckGo is unreachable from the build box (its TLS handshake is refused there), so I ran them against a local mock that serves DDG Lite's markup and DDG's `/l/` interstitial page. Results:
+  - Typing `python` and pressing Enter sent `POST /lite/` with body `q=python&kl=&df=`.
+  - The interstitial result link followed the meta refresh to the target.
+  - A `https://duckduckgo.com/l/?uddg=` link went straight to the target without contacting DDG.
+  - A JS-only redirect page was followed.
+  - Back returned to the results page from the cache, with no re-POST.
+  - Ctrl+D switched to dark mode, the setting was written to the config file, and it was still in effect after a restart.
+- **Screenshots** are in `/workspace/litebird-audit/screens/`.
+
+### Limitations
+- **No JavaScript engine.** Only the redirect patterns above are recognised, so script-driven forms and buttons won't work.
+- **No CSS, no images and no file uploads.** `<input type=file>`, `button` and `reset` are skipped.
+- **Approximate form placement.** Controls appear in the form bar, not at their exact position in the page; the inline placeholders mark where they are.
+- **Redirect unwrapping is DuckDuckGo-only.** Other search engines' redirect links still go through their own redirect pages; meta refresh and the JS patterns usually handle them.

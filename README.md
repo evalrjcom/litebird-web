@@ -31,6 +31,23 @@ This is **not** a full modern browser. It is intentionally minimal so it can boo
 - HTTPS certificates are verified (`--insecure` disables this, at your own risk)
 - Relative links, `<base href>`, redirects and `#fragments` are resolved correctly
 - Latin-1 / Windows-1252 pages are converted to UTF-8; plain-text pages are shown as text
+- **Web forms**: text/search/password/hidden inputs, textarea, select, checkbox, radio and submit
+  buttons, sent by GET or POST (`application/x-www-form-urlencoded`). Fl_Help_View cannot host
+  widgets, so each form control appears in the page as a clickable placeholder (`[q: ____]`,
+  `[ Search ]`) and as a real FLTK widget in the **form bar** under the address bar. Press Enter
+  in a text field to submit. DuckDuckGo Lite (https://lite.duckduckgo.com/lite/) works end to end.
+- **Redirects that aren't HTTP 3xx**: DuckDuckGo `duckduckgo.com/l/?uddg=` result links are decoded
+  and opened directly. `<meta http-equiv="refresh">` with a delay of 5 s or less is followed, and so
+  are simple JavaScript redirects (`location.href = "..."`, `location.replace("...")`) on near-empty
+  pages. Both stop after 5 hops.
+- **Dark mode**: use the toolbar button or **Ctrl+D**. The choice is saved in
+  `%APPDATA%\LiteBird\config.ini` (Windows) or `$XDG_CONFIG_HOME/litebird/config` (default
+  `~/.config/litebird/config`). `--dark` / `--light` override it for one session.
+- Back/Forward show cached pages instantly, so a search results page is not re-submitted.
+- Shortcuts: Ctrl+D dark mode, Ctrl+L address bar, F5 or Ctrl+R reload, Alt+Left/Right back/forward
+
+Limitations: there is no JavaScript engine (only the simple redirect patterns above are
+recognised), no CSS, no images (they are blocked on purpose), and no file uploads.
 
 ## Building
 
@@ -42,7 +59,7 @@ sudo apt-get install -y build-essential libfltk1.3-dev libcurl4-openssl-dev
 cd litebird-web   # FIX (audit): the repository folder is litebird-web
 make
 make test         # unit tests for the URL/HTML helpers
-./litebird [--insecure] [URL]
+./litebird [--insecure] [--dark|--light] [URL]
 ```
 
 Static linking is possible but increases size; for the ISO we prefer dynamic and install the shared libraries.
