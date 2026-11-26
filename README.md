@@ -26,6 +26,38 @@ This is **not** a full modern browser. It is intentionally minimal so it can boo
 - Intercepts http(s) links for in-browser navigation
 - Status bar
 - Error pages for network/HTTP failures
+<!-- CHANGED (audit): document the behaviour added by the audit -->
+- Non-blocking page loads (the window stays responsive; a new navigation cancels the old one)
+- HTTPS certificates are verified (`--insecure` disables this, at your own risk)
+- Relative links, `<base href>`, redirects and `#fragments` are resolved correctly
+- Latin-1 / Windows-1252 pages are converted to UTF-8; plain-text pages are shown as text
+- **Web forms**: text/search/password/hidden inputs, textarea, select, checkbox, radio and submit
+  buttons (including `type=image`), sent by GET or POST as `application/x-www-form-urlencoded`,
+  `multipart/form-data` or `text/plain` (the form's `enctype`), in the page's encoding
+  (UTF-8 or Windows-1252, or the form's `accept-charset`). `<label for>` / wrapping `<label>`
+  text is used as the caption and `autofocus` is honoured. Controls outside a `<form>` (JS-only
+  search/filter boxes, menu buttons, theme toggles) and hidden content (`hidden`, `aria-hidden`,
+  `display:none`, hide classes, dropdown `<nav>` menus) are skipped. The form bar shows one form at
+  a time (click another form's placeholder to switch) and collapses when there is none. Images
+  are shown as their alt text. Fl_Help_View cannot host
+  widgets, so each form control appears in the page as a clickable placeholder (`[q: ____]`,
+  `[ Search ]`) and as a real FLTK widget in the **form bar** under the address bar. Press Enter
+  in a text field to submit. DuckDuckGo Lite (https://lite.duckduckgo.com/lite/) works end to end.
+- **Redirects that aren't HTTP 3xx**: DuckDuckGo `duckduckgo.com/l/?uddg=` result links are decoded
+  and opened directly. `<meta http-equiv="refresh">` with a delay of 5 s or less is followed, and so
+  are simple JavaScript redirects (`location.href = "..."`, `location.replace("...")`) on near-empty
+  pages. Both stop after 5 hops or on a loop, with an error page that says so.
+- **Dark mode**: use the toolbar button or **Ctrl+D**. The choice is saved in
+  `%APPDATA%\LiteBird\config.ini` (Windows) or `$XDG_CONFIG_HOME/litebird/config` (default
+  `~/.config/litebird/config`). `--dark` / `--light` override it for one session.
+- Back/Forward show cached pages instantly, so a search results page is not re-submitted.
+- **Built-in home page** (`about:home`, also `litebird:home`): opens when no URL is given, and from the **Home** button or **Alt+Home**. It is embedded in the binary, so it works offline. It has two search boxes, DuckDuckGo Lite and [wiby.me](https://wiby.me/) (both GET `?q=`). The form bar starts with DuckDuckGo; click the wiby field in the page to switch to it. Nothing is focused automatically, so PageDown still scrolls. Below the search boxes are the text-only and minimalist sites from greycoder's [A List Of Text-Only & Minimalist News Sites](https://greycoder.com/a-list-of-text-only-new-sites/), grouped by its categories. `home=<url>` in the config file changes the start page.
+- **Address-bar search**: typing words in the address bar searches DuckDuckGo Lite. That covers anything with a space, or a single word without `.`, `:` or `/`, except `localhost`.
+- Shortcuts: Ctrl+D dark mode, Ctrl+L address bar, F5 or Ctrl+R reload, Alt+Left/Right back/forward, Alt+Home home page
+- Page scrolling: PageUp/PageDown, Space/Shift+Space, Up/Down, Home/End (and Ctrl+Home/End) scroll the page unless you are typing in a text field; PageUp/PageDown also work from single-line fields. A newly loaded page gets the keyboard focus unless you clicked into the address bar after starting the load or the page has an `autofocus` field. The toolbar buttons never take the focus. The mouse wheel scrolls 40 px per notch anywhere over the page.
+
+Limitations: there is no JavaScript engine (only the simple redirect patterns above are
+recognised), no CSS, no images (they are blocked on purpose), and no file uploads.
 
 ## Building
 
@@ -34,9 +66,10 @@ This is **not** a full modern browser. It is intentionally minimal so it can boo
 sudo apt-get update
 sudo apt-get install -y build-essential libfltk1.3-dev libcurl4-openssl-dev
 
-cd litebird
+cd litebird-web   # FIX (audit): the repository folder is litebird-web
 make
-./litebird
+make test         # unit tests for the URL/HTML helpers
+./litebird [--insecure] [--dark|--light] [URL]   # no URL: the built-in home page
 ```
 
 Static linking is possible but increases size; for the ISO we prefer dynamic and install the shared libraries.
@@ -72,7 +105,7 @@ sudo chroot litebird-root
 
 # Inside chroot
 apt-get update
-apt-get install -y fltk1.3 libcurl4 xorg openbox xterm
+apt-get install -y libfltk1.3 libcurl4 ca-certificates xorg openbox xterm   # FIX (audit): binary package is libfltk1.3; ca-certificates needed for HTTPS (enable 'universe')
 # Copy litebird binary and create desktop autostart
 # Configure openbox to start litebird
 # exit
@@ -86,7 +119,7 @@ For the absolute smallest size that still runs a GUI browser, prefer **Buildroot
 
 - Fl_Help_View supports only a subset of HTML (no modern CSS, limited JS, no complex layouts).
 - No JavaScript engine (Ladybird's LibJS is far larger).
-- SSL verification disabled by default for minimal systems (enable for production).
+- TLS certificates are verified by default; `--insecure` turns that off for minimal systems without a CA bundle.
 - Single process (Ladybird uses multi-process isolation; that would require significant extra code and IPC).
 
 ## License

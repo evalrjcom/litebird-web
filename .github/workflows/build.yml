@@ -6,6 +6,16 @@ on:
   pull_request:
     branches: [ main ]
 
+# CHANGED: least-privilege token (the workflow only reads the repo).
+permissions:
+  contents: read
+
+# CHANGED: a new push to the same branch/PR cancels the superseded run
+# (the Windows vcpkg build takes ~10 minutes).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     strategy:
@@ -14,6 +24,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45   # CHANGED: a hung vcpkg/curl step no longer burns 6 hours
 
     steps:
     - uses: actions/checkout@v4
@@ -28,6 +39,11 @@ jobs:
     - name: Build (Linux)
       if: runner.os == 'Linux'
       run: make
+
+    # CHANGED: run the helper unit tests (URL resolution, link rewriting, charsets).
+    - name: Unit tests (Linux)
+      if: runner.os == 'Linux'
+      run: make test
 
     - name: Check binary (Linux)
       if: runner.os == 'Linux'
