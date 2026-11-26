@@ -51,7 +51,9 @@ This is **not** a full modern browser. It is intentionally minimal so it can boo
   `%APPDATA%\LiteBird\config.ini` (Windows) or `$XDG_CONFIG_HOME/litebird/config` (default
   `~/.config/litebird/config`). `--dark` / `--light` override it for one session.
 - Back/Forward show cached pages instantly, so a search results page is not re-submitted.
-- Shortcuts: Ctrl+D dark mode, Ctrl+L address bar, F5 or Ctrl+R reload, Alt+Left/Right back/forward
+- **Built-in home page** (`about:home`, also `litebird:home`): opens when no URL is given, and from the **Home** button or **Alt+Home**. It is embedded in the binary, so it works offline. It has two search boxes, DuckDuckGo Lite and [wiby.me](https://wiby.me/) (both GET `?q=`). The form bar starts with DuckDuckGo; click the wiby field in the page to switch to it. Nothing is focused automatically, so PageDown still scrolls. Below the search boxes are the text-only and minimalist sites from greycoder's [A List Of Text-Only & Minimalist News Sites](https://greycoder.com/a-list-of-text-only-new-sites/), grouped by its categories. `home=<url>` in the config file changes the start page.
+- **Address-bar search**: typing words in the address bar searches DuckDuckGo Lite. That covers anything with a space, or a single word without `.`, `:` or `/`, except `localhost`.
+- Shortcuts: Ctrl+D dark mode, Ctrl+L address bar, F5 or Ctrl+R reload, Alt+Left/Right back/forward, Alt+Home home page
 - Page scrolling: PageUp/PageDown, Space/Shift+Space, Up/Down, Home/End (and Ctrl+Home/End) scroll the page unless you are typing in a text field; PageUp/PageDown also work from single-line fields. A newly loaded page gets the keyboard focus unless you clicked into the address bar after starting the load or the page has an `autofocus` field. The toolbar buttons never take the focus. The mouse wheel scrolls 40 px per notch anywhere over the page.
 
 Limitations: there is no JavaScript engine (only the simple redirect patterns above are
@@ -67,7 +69,7 @@ sudo apt-get install -y build-essential libfltk1.3-dev libcurl4-openssl-dev
 cd litebird-web   # FIX (audit): the repository folder is litebird-web
 make
 make test         # unit tests for the URL/HTML helpers
-./litebird [--insecure] [--dark|--light] [URL]
+./litebird [--insecure] [--dark|--light] [URL]   # no URL: the built-in home page
 ```
 
 Static linking is possible but increases size; for the ISO we prefer dynamic and install the shared libraries.

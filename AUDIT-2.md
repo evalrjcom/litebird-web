@@ -200,11 +200,44 @@ Clicking the scrollbar (or a toolbar button) "fixed" it because those widgets ta
 
 **Tests:** 30 unit assertions for `scroll_key_target()`, and `tests/gui/scroll_keys.sh` with the mock's `/long`, `/long2` and `/longform` pages, 21 checks. On the e34b60f code (with only the debug log added), 13 of the 21 checks fail; with the fix, all 21 pass under the release build, ASan+UBSan and TSan.
 
+## Feature: built-in home page (FEAT(5))
+
+**Request:** start up with a local home page with search boxes for DuckDuckGo Lite and wiby.me, and include the text-only sites from greycoder.
+
+- **Embedded page:** `about:home` (also `litebird:home`) is a C++ raw string in the binary, with no files and no network. `navigate()` builds it synchronously, before URL normalisation, so it never reaches the http(s)-only checks.
+  - It goes through `prepare_html()` and `show_page()` like any page, so history, Back/Forward, reload, the page cache, dark mode and the form bar all work unchanged.
+  - The address bar shows the canonical `about:home`.
+- **Start page:** the URL argument wins, then `home=` in the config file, then `about:home`. Saving dark mode keeps the `home=` line.
+- **Home button and shortcut:** a toolbar **Home** button (a `NoFocusButton`, so it never takes the focus) and **Alt+Home**.
+- **Search forms:** two real `<form>`s, both GET with a `q` text field and a submit button.
+  - `https://lite.duckduckgo.com/lite/`: GET `?q=` returns the same results as DDG's own POST form. GET was chosen because the URL bar then shows the query and reload/Back work without re-posting.
+  - `https://wiby.me/`: wiby's homepage form is `<form method="get" action="/">` with `name="q"`. `curl https://wiby.me/?q=python` returns results.
+  - The fields use `aria-label` captions and no `autofocus`, so the page keeps the focus and PageDown works.
+  - The bar starts with the DuckDuckGo form; clicking the wiby placeholder switches it (FIX(3)).
+- **Address-bar search:** words typed in the address bar go to DuckDuckGo Lite (`address_bar_search_url()`). That covers input with a space, or a single word without `.`, `:` or `/`, except `localhost`.
+- **Sites:** 35 sites from https://greycoder.com/a-list-of-text-only-new-sites/ (fetched 2026-11-26), under the article's categories, with a credit link. All were checked with curl.
+  - Dropped: UK Daily Mail Text-Base (now redirects to the regular Daily Mail homepage) and News Minimalist (Vercel JavaScript checkpoint, unusable without JS).
+  - Teahose is linked over https because `http://www.teahose.com` returned 500.
+  - Not included, because they are not separate sites: SkimFeed / Brutalist Report sub-section links, the Google "weather" search link, and the article's reader-mode how-to link.
+- **Styling:** no colours or CSS on the page, so dark mode is the normal rewrite.
+- **Test hooks:** `LITEBIRD_DDG_LITE_URL` / `LITEBIRD_WIBY_URL` (http(s) only) point the two searches at the mock server.
+
+**Tests:**
+- **Unit tests:** both forms parse as visible and submittable, with the right action, method and fields; 4 inline controls; no autofocus; 36 links, all http(s), including the greycoder credit; no colour/style; overridable actions; `is_home_url`; `address_bar_search_url` (10 cases); `home=` parsing; dark-mode save keeps `home=`.
+- **GUI test** `tests/gui/home_page.sh`, 18 checks:
+  - start-up with no args shows the home page with no request and the focus on the page; PageDown works;
+  - DDG via Enter and via the bar's button: `GET /lite/?q=…`;
+  - wiby via its placeholder: `GET /wiby/?q=wibytest`;
+  - Alt+Home and the Home button; Back/Forward through the home page (cached, no request);
+  - address-bar words: `GET /lite/?q=hello+world`;
+  - typed `about:home` / `litebird:home`; F5 on the home page (no request).
+
 ## Files
 - `litebird.cpp`: corrected source, with FIX(2) / CHANGED(2) markers
 - `tests/test_helpers.cpp`: extended unit tests (`make test`)
 - `tests/gui/gui_smoke.sh` and `tests/gui/mock_server.py`: the GUI smoke test (Xvfb + xdotool) and the DDG-like mock server
 - `tests/gui/scroll_keys.sh`: keyboard/wheel scrolling GUI test (FIX(4))
+- `tests/gui/home_page.sh`: built-in home page GUI test (FEAT(5))
 - `Makefile`, `README.md`: small fixes (items 35 and 36)
 
 The sanitizer run logs and before/after screenshots referenced above were kept out of the repository.
