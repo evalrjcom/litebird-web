@@ -1971,6 +1971,68 @@ void save_dark_setting(bool dark) {
 }
 
 // ---------------------------------------------------------------------------
+// FIX(4): keyboard scrolling of the page view
+// ---------------------------------------------------------------------------
+// Fl_Help_View has no key handling of its own: PageDown etc. only reach its
+// scrollbar as FL_SHORTCUT, i.e. when the focused widget ignores the key. A
+// single-line Fl_Input does not ignore it: with Fl::OPTION_ARROW_FOCUS off
+// (the default) it "moves the cursor one page" and reports the key as used.
+// The address bar keeps the focus after Enter, and the form bar used to focus
+// the page's first text field after every load, so PageDown, Space and the
+// arrows silently did nothing until the user clicked the scrollbar (which
+// takes the focus). Scroll keys are now handled at window level instead.
+
+// What has the keyboard focus, as far as scrolling is concerned.
+enum class FocusKind {
+    Page,         // nothing, the page view, its scrollbars, toolbar buttons
+    TextInput,    // single-line text field (address bar, form text field)
+    TextArea,     // multi-line text field: every key is editing
+    FormControl,  // other form-bar control (button, checkbox, select)
+};
+
+// Returns the new top line for a page-scroll key, or -1 when the key is not
+// a scroll key in this focus context (the focused widget gets it instead).
+// key/state: Fl::event_key() / Fl::event_state(). doc_h: document height,
+// view_h: widget height, sb: scrollbar size, line: one arrow-key step.
+//  - PageUp/PageDown scroll unless a multi-line field has the focus (a
+//    single-line field has nothing to page through, as in other browsers);
+//  - Space/Shift+Space, Up/Down, Home/End and Ctrl+Home/End only scroll when
+//    no text field or form control has the focus (there they type/act).
+int scroll_key_target(int key, int state, FocusKind focus, int top, int doc_h, int view_h, int sb, int line) {
+    if (focus == FocusKind::TextArea) return -1;
+    int mods = state & (FL_SHIFT | FL_CTRL | FL_ALT | FL_META);
+    bool page_focus = focus == FocusKind::Page;
+    int visible = std::max(1, view_h - sb);
+    int page = std::max(line, visible - line);  // keep one line of overlap
+    int max_top = std::max(0, doc_h - visible);
+    int t;
+    switch (key) {
+        case FL_Page_Down: if (mods) return -1; t = top + page; break;
+        case FL_Page_Up:   if (mods) return -1; t = top - page; break;
+        case ' ':
+            if (!page_focus || (mods & ~FL_SHIFT)) return -1;
+            t = (mods & FL_SHIFT) ? top - page : top + page;
+            break;
+        case FL_Down: if (!page_focus || mods) return -1; t = top + line; break;
+        case FL_Up:   if (!page_focus || mods) return -1; t = top - line; break;
+        case FL_Home: if (!page_focus || (mods & ~FL_CTRL)) return -1; t = 0; break;
+        case FL_End:  if (!page_focus || (mods & ~FL_CTRL)) return -1; t = max_top; break;
+        default: return -1;
+    }
+    return std::max(0, std::min(t, max_top));
+}
+
+// FIX(4): toolbar button that never takes the keyboard focus. Fl_Button
+// grabs the focus on every click (it checks only the global
+// Fl::visible_focus(), not the widget's flag), so after Go/Back/Fwd/Dark the
+// focus sat on the button and Space re-pressed it instead of scrolling.
+class NoFocusButton : public Fl_Button {
+public:
+    NoFocusButton(int X, int Y, int W, int H, const char* L = nullptr) : Fl_Button(X, Y, W, H, L) { visible_focus(0); }
+    int handle(int e) override { return e == FL_FOCUS ? 0 : Fl_Button::handle(e); }
+};
+
+// ---------------------------------------------------------------------------
 // UI
 // ---------------------------------------------------------------------------
 
@@ -2035,16 +2097,16 @@ public:
         url_->value("https://example.com");
         url_->when(FL_WHEN_ENTER_KEY_ALWAYS);
         url_->callback(cb_go, this);
-        auto* go = new Fl_Button(w - 250, 8, 55, 28, "Go");
+        auto* go = new NoFocusButton(w - 250, 8, 55, 28, "Go");  // FIX(4)
         go->callback(cb_go, this);
-        back_ = new Fl_Button(w - 190, 8, 55, 28, "Back");
+        back_ = new NoFocusButton(w - 190, 8, 55, 28, "Back");
         back_->callback(cb_back, this);
         back_->tooltip("Back (Alt+Left)");
-        fwd_ = new Fl_Button(w - 130, 8, 55, 28, "Fwd");
+        fwd_ = new NoFocusButton(w - 130, 8, 55, 28, "Fwd");
         fwd_->callback(cb_fwd, this);
         fwd_->tooltip("Forward (Alt+Right)");
         // FEATURE: dark-mode toggle (also Ctrl+D).
-        theme_btn_ = new Fl_Button(w - 70, 8, 60, 28, "Dark");
+        theme_btn_ = new NoFocusButton(w - 70, 8, 60, 28, "Dark");
         theme_btn_->callback(cb_theme, this);
         theme_btn_->tooltip("Toggle dark mode (Ctrl+D)");
         bar_->resizable(url_);
@@ -2061,6 +2123,13 @@ public:
         view_->textsize(14);
         view_->link(link_cb);
         view_->user_data(this);
+        // FIX(4): LITEBIRD_DEBUG_SCROLL=1 logs every scroll position and the
+        // focus owner to stderr (used by tests/gui/scroll_keys.sh).
+        debug_scroll_ = std::getenv("LITEBIRD_DEBUG_SCROLL") != nullptr;
+        if (debug_scroll_) view_->callback([](Fl_Widget* w, void* v) {
+            std::fprintf(stderr, "LB_SCROLL topline=%d focus=%s\n", static_cast<Fl_Help_View*>(w)->topline(),
+                         static_cast<BrowserUI*>(v)->focus_name());
+        }, this);
 
         status_ = new Fl_Box(5, h - 25, w - 10, 20, "Ready");
         status_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
@@ -2230,6 +2299,10 @@ private:
     std::vector<std::unique_ptr<std::vector<std::string>>> menu_labels_, old_menu_labels_;
     unsigned long gen_ = 0;              // only results for the latest navigation are shown
     bool in_set_value_ = false;          // true while we hand a document to view_
+    bool debug_scroll_ = false;          // FIX(4): LITEBIRD_DEBUG_SCROLL
+    Fl_Widget* panel_autofocus_ = nullptr;  // FIX(4): form-bar control with `autofocus`
+    bool url_claimed_ = false;           // FIX(4): user focused the address bar since the last Go/Back/Fwd/reload
+    static const int kScrollLine = 40;   // FIX(4): arrow-key / wheel-notch step in pixels
     std::mutex jobs_mu_;
     std::vector<Job> jobs_;
 
@@ -2259,11 +2332,69 @@ private:
     }
 
     void show_document(const std::shared_ptr<Page>& pg) {
+        // FIX(4): checked before the old form bar goes away. The address bar
+        // also keeps the focus when the user clicked into it (or pressed Ctrl+L)
+        // after starting this load, even before typing anything.
+        bool typing = user_typing_url() || (Fl::focus() == url_ && url_claimed_);
         if (pg->active_form == -2) pg->active_form = default_form(*pg);
         cur_ = pg;
         set_document(dark_ ? apply_dark_theme(pg->html) : pg->html);
         if (!pg->fragment.empty()) view_->topline(pg->fragment.c_str());  // FIX: #fragment was ignored
         build_panel();
+        // FIX(4): a newly shown page gets the keyboard focus, so PageDown/Space/
+        // arrows scroll it. Before, the focus stayed in the address bar after
+        // Enter (or moved into the page's first text field), and those keys
+        // were swallowed. Exceptions: the user is typing a new address (FIX(2)
+        // no-focus-steal), or the page asks for a field with `autofocus`.
+        if (!typing) {
+            if (panel_autofocus_) panel_autofocus_->take_focus();
+            else view_->take_focus();
+        }
+        if (debug_scroll_) std::fprintf(stderr, "LB_FOCUS shown focus=%s\n", focus_name());
+    }
+
+    // FIX(4): classification of the focus owner for scroll_key_target().
+    FocusKind focus_kind() const {
+        Fl_Widget* f = Fl::focus();
+        if (!f) return FocusKind::Page;
+        if (auto* in = dynamic_cast<Fl_Input_*>(f))
+            return (in->input_type() & FL_INPUT_TYPE) == FL_MULTILINE_INPUT ? FocusKind::TextArea : FocusKind::TextInput;
+        if (panel_->contains(f)) return FocusKind::FormControl;
+        return FocusKind::Page;
+    }
+    const char* focus_name() const {
+        Fl_Widget* f = Fl::focus();
+        if (!f) return "none";
+        if (f == url_) return "url";
+        if (view_->contains(f)) return "view";
+        if (panel_->contains(f)) return "form";
+        return "other";
+    }
+
+    // FIX(4): PageUp/PageDown, Space/Shift+Space, Up/Down, Home/End (and
+    // Ctrl+Home/End) scroll the page from wherever the focus is, unless a
+    // text field or form control needs the key (see scroll_key_target()).
+    bool handle_scroll_key() {
+        if (!cur_ || !view_->visible_r()) return false;
+        int sb = view_->scrollbar_size() ? view_->scrollbar_size() : Fl::scrollbar_size();
+        int top = view_->topline();
+        int t = scroll_key_target(Fl::event_key(), Fl::event_state(), focus_kind(), top, view_->size(), view_->h(), sb,
+                                  kScrollLine);
+        if (t < 0) return false;
+        if (t != top) view_->topline(t);
+        return true;
+    }
+
+    // FIX(4): the mouse wheel scrolls the page anywhere over it (kScrollLine
+    // px per notch; FLTK's own scrollbar step was 16 px, about one text line).
+    bool handle_wheel() {
+        if (!cur_ || !view_->visible_r() || !Fl::event_inside(view_) || Fl::event_dy() == 0) return false;
+        int sb = view_->scrollbar_size() ? view_->scrollbar_size() : Fl::scrollbar_size();
+        int max_top = std::max(0, view_->size() - (view_->h() - sb));
+        int top = view_->topline();
+        int t = std::max(0, std::min(top + Fl::event_dy() * kScrollLine, max_top));
+        if (t != top) view_->topline(t);
+        return true;
     }
 
     void set_status(const std::string& s) { status_->copy_label(escape_label(s).c_str()); }
@@ -2383,6 +2514,7 @@ private:
     }
 
     void reload() {
+        url_claimed_ = false;  // FIX(4)
         navigate(hist_idx_ >= 0 ? hist_[hist_idx_].url : std::string(url_->value()), NavMode::Push);
     }
 
@@ -2504,8 +2636,8 @@ private:
     void build_panel() {
         // FIX(2): remember whether the user is typing in the address bar
         // (focused *and* edited since we last set it).
-        bool url_focused = user_typing_url();
         clear_panel();
+        panel_autofocus_ = nullptr;  // FIX(4): focus is set by show_document()
         panel_page_ = cur_;
         ref_widget_.assign(cur_ ? cur_->refs.size() : 0, nullptr);
         // FIX(3): collapse the bar when the page has no form worth showing.
@@ -2582,14 +2714,11 @@ private:
         panel_->end();
         Fl_Group::current(nullptr);
         layout_all();
-        // Focus the first text field so the user can type right away (DDG Lite).
-        // FIX(2): not while the user is typing a new address (keystrokes used to
-        // jump into the page's search box mid-word when a load finished), and an
-        // explicit autofocus control wins over "first text field".
-        if (url_focused) return;
-        if (autofocus) { autofocus->take_focus(); return; }
-        for (auto& it : items_)
-            if (dynamic_cast<Fl_Input*>(it.w) && it.w->active()) { it.w->take_focus(); break; }
+        // FIX(4): no focus change here any more. Focusing the page's first text
+        // field after every load swallowed PageDown/Space/arrow keys (see
+        // scroll_key_target()); only an explicit `autofocus` control is focused,
+        // by show_document(), and still not while the user types an address.
+        panel_autofocus_ = autofocus;
     }
 
     // Positions toolbar, form bar, page view and status bar.
@@ -2749,14 +2878,17 @@ private:
 
     static void cb_go(Fl_Widget*, void* v) {
         auto* self = static_cast<BrowserUI*>(v);
+        self->url_claimed_ = false;  // FIX(4): the page gets the focus when it is shown
         self->navigate(self->url_->value(), NavMode::Push);
     }
     static void cb_back(Fl_Widget*, void* v) {
         auto* self = static_cast<BrowserUI*>(v);
+        self->url_claimed_ = false;  // FIX(4)
         if (self->hist_idx_ > 0) self->traverse(self->hist_idx_ - 1);
     }
     static void cb_fwd(Fl_Widget*, void* v) {
         auto* self = static_cast<BrowserUI*>(v);
+        self->url_claimed_ = false;  // FIX(4)
         if (self->hist_idx_ + 1 < (int)self->hist_.size()) self->traverse(self->hist_idx_ + 1);
     }
     static void cb_theme(Fl_Widget*, void* v) { static_cast<BrowserUI*>(v)->toggle_theme(); }
@@ -2764,6 +2896,17 @@ private:
     // FEATURE: global shortcuts, checked before normal event delivery.
     static int dispatch(int e, Fl_Window* w) {
         if (e == FL_KEYBOARD && g_ui && g_ui->handle_shortcut()) return 1;
+        // FIX(4): page scrolling by keyboard / wheel and click-to-focus, only
+        // for our window and never while a popup (menu, Fl_Choice) holds the grab.
+        if (g_ui && w == g_ui && !Fl::grab()) {
+            if (e == FL_KEYBOARD && g_ui->handle_scroll_key()) return 1;
+            if (e == FL_MOUSEWHEEL && g_ui->handle_wheel()) return 1;
+            // Fl_Help_View never takes the focus on a click, so after a click
+            // on the page (or a link) the focus stayed in the address bar.
+            if (e == FL_PUSH && Fl::event_inside(g_ui->view_) && !g_ui->view_->contains(Fl::focus()))
+                g_ui->view_->take_focus();
+            if (e == FL_PUSH && Fl::event_inside(g_ui->url_)) g_ui->url_claimed_ = true;
+        }
         return Fl::handle_(e, w);
     }
     bool handle_shortcut() {
@@ -2771,7 +2914,12 @@ private:
         int st = Fl::event_state();
         bool ctrl = (st & FL_COMMAND) != 0, alt = (st & FL_ALT) != 0;
         if (ctrl && k == 'd') { toggle_theme(); return true; }
-        if (ctrl && k == 'l') { url_->take_focus(); url_->position(url_->size(), 0); return true; }
+        if (ctrl && k == 'l') {
+            url_claimed_ = true;  // FIX(4): keep the address bar focused when a load finishes
+            url_->take_focus();
+            url_->position(url_->size(), 0);
+            return true;
+        }
         if (k == FL_F + 5 || (ctrl && k == 'r')) { reload(); return true; }
         if (alt && k == FL_Left) { cb_back(nullptr, this); return true; }
         if (alt && k == FL_Right) { cb_fwd(nullptr, this); return true; }
@@ -2866,7 +3014,8 @@ void print_usage(const char* argv0) {
               << "  --insecure   disable TLS certificate verification (unsafe)\n"
               << "  --dark       start in dark mode (--light: light mode); not saved\n"
               << "Shortcuts: Ctrl+D dark mode, Ctrl+L address bar, F5/Ctrl+R reload,\n"
-              << "           Alt+Left / Alt+Right back / forward\n";
+              << "           Alt+Left / Alt+Right back / forward\n"
+              << "Scrolling: PageUp/PageDown, Space/Shift+Space, Up/Down, Home/End\n";  // FIX(4)
 }
 
 }  // namespace

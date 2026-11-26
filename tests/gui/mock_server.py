@@ -29,6 +29,16 @@ class H(http.server.BaseHTTPRequestHandler):
                       '<label><input type="checkbox" id="darkToggle"> Dark mode</label></div>'
                       '<nav class="dropdown-nav navex"><input placeholder="Filter..."><button>&times;</button></nav>'
                       '<img src="/logo.png" alt="Logo"><svg><title>icon</title></svg><h1>Python Tutorial</h1></body></html>')
+        elif u.path in ("/long", "/long2"):
+            # FIX(4): long pages for the keyboard-scrolling checks. The first line is
+            # a link (clicked by the GUI test); /longform adds an autofocus field.
+            nxt = "/long2" if u.path == "/long" else "/long"
+            paras = "".join(f"<p>Paragraph {i} of {u.path}: lorem ipsum dolor sit amet.</p>" for i in range(200))
+            self.send(f'<html><head><title>{u.path[1:]}</title></head><body><a href="{nxt}">NEXTLINK</a>{paras}</body></html>')
+        elif u.path == "/longform":
+            paras = "".join(f"<p>Form page paragraph {i}.</p>" for i in range(200))
+            self.send('<html><head><title>longform</title></head><body><form action="/echo">'
+                      f'<input name="q" autofocus><input type="submit" value="Find"></form>{paras}</body></html>')
         elif u.path == "/dupsel":
             self.send('<html><head><title>dupsel</title></head><body><form action="/echo" method="get"><input name="q" value="x">'
                       '<select name="k"><option value="a">A</option><option value="1">--</option><option value="2">--</option>'

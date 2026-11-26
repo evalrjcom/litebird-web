@@ -371,6 +371,42 @@ int main() {
             std::cerr << "FAIL labels: " << o << "\n"; fails++;
         }
     }
+    {   // FIX(4): keyboard scrolling targets (doc 5000 px, view 500 px, scrollbar 16, line 40)
+        auto T = [](int key, int st, FocusKind fk, int top) {
+            return std::to_string(scroll_key_target(key, st, fk, top, 5000, 500, 16, 40));
+        };
+        const FocusKind P = FocusKind::Page, TI = FocusKind::TextInput, TA = FocusKind::TextArea, FC = FocusKind::FormControl;
+        expect(T(FL_Page_Down, 0, P, 0), "444", "PageDown = visible height - one line");
+        expect(T(FL_Page_Down, 0, TI, 0), "444", "PageDown from a single-line field scrolls");
+        expect(T(FL_Page_Down, 0, FC, 0), "444", "PageDown from a form control scrolls");
+        expect(T(FL_Page_Down, 0, TA, 0), "-1", "PageDown in a textarea is the textarea's");
+        expect(T(FL_Page_Down, FL_CTRL, P, 0), "-1", "Ctrl+PageDown not ours");
+        expect(T(FL_Page_Down, FL_NUM_LOCK, P, 0), "444", "NumLock ignored");
+        expect(T(FL_Page_Up, 0, P, 1000), "556", "PageUp");
+        expect(T(FL_Page_Up, 0, P, 100), "0", "PageUp clamps at 0");
+        expect(T(FL_Page_Down, 0, P, 4400), "4516", "PageDown clamps at doc - visible");
+        expect(T(' ', 0, P, 0), "444", "Space");
+        expect(T(' ', FL_SHIFT, P, 1000), "556", "Shift+Space");
+        expect(T(' ', 0, TI, 0), "-1", "Space types in a text field");
+        expect(T(' ', 0, FC, 0), "-1", "Space presses a form button");
+        expect(T(' ', FL_CTRL, P, 0), "-1", "Ctrl+Space not ours");
+        expect(T(FL_Down, 0, P, 0), "40", "Down");
+        expect(T(FL_Up, 0, P, 100), "60", "Up");
+        expect(T(FL_Up, 0, P, 10), "0", "Up clamps");
+        expect(T(FL_Down, 0, TI, 0), "-1", "Down in a text field is not ours");
+        expect(T(FL_Down, 0, FC, 0), "-1", "Down on a form control is not ours");
+        expect(T(FL_Down, FL_ALT, P, 0), "-1", "Alt+Down not ours");
+        expect(T(FL_Home, 0, P, 900), "0", "Home");
+        expect(T(FL_End, 0, P, 0), "4516", "End");
+        expect(T(FL_Home, FL_CTRL, P, 900), "0", "Ctrl+Home");
+        expect(T(FL_End, FL_CTRL, P, 0), "4516", "Ctrl+End");
+        expect(T(FL_End, 0, TI, 0), "-1", "End in a text field moves the cursor");
+        expect(T(FL_Left, 0, P, 0), "-1", "Left is not a scroll key");
+        expect(T('a', 0, P, 0), "-1", "letters are not scroll keys");
+        expect(std::to_string(scroll_key_target(FL_Page_Down, 0, P, 0, 300, 500, 16, 40)), "0", "short page stays at 0");
+        expect(std::to_string(scroll_key_target(FL_End, 0, P, 0, 300, 500, 16, 40)), "0", "End on a short page");
+        expect(std::to_string(scroll_key_target(FL_Page_Down, 0, P, 0, 5000, 30, 16, 40)), "40", "tiny view pages by a line");
+    }
     std::cout << (fails ? "FAILED: " : "All tests passed: ") << fails << " failures\n";
     return fails ? 1 : 0;
 }
