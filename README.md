@@ -32,14 +32,17 @@ This is **not** a full modern browser. It is intentionally minimal so it can boo
 - Relative links, `<base href>`, redirects and `#fragments` are resolved correctly
 - Latin-1 / Windows-1252 pages are converted to UTF-8; plain-text pages are shown as text
 - **Web forms**: text/search/password/hidden inputs, textarea, select, checkbox, radio and submit
-  buttons, sent by GET or POST (`application/x-www-form-urlencoded`). Fl_Help_View cannot host
+  buttons (including `type=image`), sent by GET or POST as `application/x-www-form-urlencoded`,
+  `multipart/form-data` or `text/plain` (the form's `enctype`), in the page's encoding
+  (UTF-8 or Windows-1252, or the form's `accept-charset`). `<label for>` / wrapping `<label>`
+  text is used as the caption and `autofocus` is honoured. Fl_Help_View cannot host
   widgets, so each form control appears in the page as a clickable placeholder (`[q: ____]`,
   `[ Search ]`) and as a real FLTK widget in the **form bar** under the address bar. Press Enter
   in a text field to submit. DuckDuckGo Lite (https://lite.duckduckgo.com/lite/) works end to end.
 - **Redirects that aren't HTTP 3xx**: DuckDuckGo `duckduckgo.com/l/?uddg=` result links are decoded
   and opened directly. `<meta http-equiv="refresh">` with a delay of 5 s or less is followed, and so
   are simple JavaScript redirects (`location.href = "..."`, `location.replace("...")`) on near-empty
-  pages. Both stop after 5 hops.
+  pages. Both stop after 5 hops or on a loop, with an error page that says so.
 - **Dark mode**: use the toolbar button or **Ctrl+D**. The choice is saved in
   `%APPDATA%\LiteBird\config.ini` (Windows) or `$XDG_CONFIG_HOME/litebird/config` (default
   `~/.config/litebird/config`). `--dark` / `--light` override it for one session.
@@ -109,7 +112,7 @@ For the absolute smallest size that still runs a GUI browser, prefer **Buildroot
 
 - Fl_Help_View supports only a subset of HTML (no modern CSS, limited JS, no complex layouts).
 - No JavaScript engine (Ladybird's LibJS is far larger).
-- SSL verification disabled by default for minimal systems (enable for production).
+- TLS certificates are verified by default; `--insecure` turns that off for minimal systems without a CA bundle.
 - Single process (Ladybird uses multi-process isolation; that would require significant extra code and IPC).
 
 ## License

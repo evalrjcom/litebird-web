@@ -4,6 +4,7 @@
 #include "../litebird.cpp"
 #undef main
 #include <cassert>
+#include <chrono>
 
 static int fails = 0;
 static void expect(const std::string& got, const std::string& want, const char* what) {
@@ -96,7 +97,9 @@ int main() {
     expect(form_urlencode({{"q", "python tutorial"}, {"kl", ""}, {"x&y", "a=b/c+d"}}),
            "q=python+tutorial&kl=&x%26y=a%3Db%2Fc%2Bd", "urlencode");
     expect(form_urlencode({{"q", "caf\xC3\xA9"}}), "q=caf%C3%A9", "urlencode utf8");
-    expect(form_get_url("https://h.com/s?old=1#f", "q=a"), "https://h.com/s?q=a", "get url");
+    // CHANGED(2): the action's #fragment is kept (HTML "mutate action URL").
+    expect(form_get_url("https://h.com/s?old=1#f", "q=a"), "https://h.com/s?q=a#f", "get url");
+    expect(form_get_url("https://h.com/s?old=1", "q=a"), "https://h.com/s?q=a", "get url no frag");
 
     // ---- form extraction (DuckDuckGo Lite-like markup) ----
     {
@@ -143,6 +146,164 @@ int main() {
     expect(percent_decode("a%2Fb+c%zz%4", true), "a/b c%zz%4", "percent_decode");
     expect(query_param("https://x/?a=1&b=two+words&c", "b"), "two words", "query_param");
 
+
+    // ================= AUDIT-2 tests =================
+    // entities
+    expect(decode_entities("a&nbsp;b"), "a\xC2\xA0" "b", "nbsp");
+    expect(decode_entities("&copy;&eacute;&mdash;&euro;"), "\xC2\xA9\xC3\xA9\xE2\x80\x94\xE2\x82\xAC", "named");
+    expect(decode_entities("&#150;&#x96;"), "\xE2\x80\x93\xE2\x80\x93", "cp1252 numeric");
+    expect(decode_entities("&#xD800;&#0;&#1114112;"), "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD", "invalid numeric");
+    expect(decode_entities("&# 65;&#-1;&#x;&;"), "&# 65;&#-1;&#x;&;", "malformed numeric");
+    expect(decode_entities("a=1&copy=2&b"), "a=1&copy=2&b", "no semicolon");
+    expect(decode_entities("&COPY;&Eacute;"), "&COPY;\xC3\x89", "case sensitive");
+    {   // no quadratic scan: 200k '&' without ';' must be fast
+        std::string big(200000, '&');
+        auto t0 = std::chrono::steady_clock::now();
+        std::string r = decode_entities(big);
+        double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        if (r != big || sec > 1.0) { std::cerr << "FAIL entity perf " << sec << "s\n"; fails++; }
+    }
+    expect(utf8_truncate("\xC3\xA9\xC3\xA9\xC3\xA9", 2), "\xC3\xA9\xC3\xA9...", "utf8 truncate");
+    expect(utf8_truncate("abc", 3), "abc", "utf8 truncate exact");
+    expect(utf8_to_cp1252("caf\xC3\xA9 \xE2\x82\xAC \xE2\x9C\x93"), "caf\xE9 \x80 &#10003;", "utf8->cp1252");
+    {
+        std::string o;
+        std::string le = std::string("\xFF\xFE", 2) + std::string("h\0i\0", 4) + std::string("\x3D\xD8\x00\xDE", 4);
+        if (!decode_bom(le, o) || o != "hi\xF0\x9F\x98\x80") { std::cerr << "FAIL utf16 bom [" << o << "]\n"; fails++; }
+        if (!decode_bom("\xEF\xBB\xBFok", o) || o != "ok") { std::cerr << "FAIL utf8 bom\n"; fails++; }
+        if (decode_bom("plain", o)) { std::cerr << "FAIL no bom\n"; fails++; }
+    }
+    // forms: nested form (HTML: inner <form> ignored, the first </form> closes the outer one)
+    {
+        std::vector<std::string> l; std::vector<Form> f; std::vector<FieldRef> r;
+        prepare_html("<form action=/a><input name=q><form action=/inner><input name=in1></form><input name=after>",
+                     "https://h.com/x", "TK", l, f, r);
+        expect(std::to_string(f.size()), "2", "nested form ignored");
+        if (f.size() == 2) {
+            expect(f[0].action + ":" + std::to_string(f[0].fields.size()), "https://h.com/a:2", "inner controls in outer form");
+            expect(f[1].fields[0].name, "after", "after </form> is outside");
+        }
+    }
+    // forms: unclosed select, labels, image, autofocus, enctype, charset
+    {
+        std::vector<std::string> l; std::vector<Form> f; std::vector<FieldRef> r;
+        std::string h =
+            "<form action=/a method=post enctype=multipart/form-data accept-charset=iso-8859-1>"
+            "<label for=q>Query</label><input id=q name=q autofocus>"
+            "<select name=s><option>One<option>Two"
+            "<input type=image name=go alt=Go>"
+            "<label>Wrapped <input name=w></label>"
+            "</form>"
+            "<p>visible text after</p>"
+            "<button>unclosed";
+        std::string o = prepare_html(h, "https://h.com/x", "TK", l, f, r);
+        expect(std::to_string(f.size()), "2", "form + orphan");
+        if (f.size() == 2 && f[0].fields.size() == 4) {
+            expect(f[0].action + "|" + f[0].method + "|" + f[0].enctype + (f[0].single_byte ? "|1252" : "|utf8"),
+                   "https://h.com/a|post|multipart|1252", "form attrs");
+            expect(f[0].fields[0].label, "Query", "label for");
+            expect(f[0].fields[0].autofocus ? "y" : "n", "y", "autofocus");
+            expect(std::to_string(f[0].fields[1].options.size()), "2", "unclosed select bounded");
+            expect(f[0].fields[2].image ? f[0].fields[2].label : "no", "Go", "image submit");
+            expect(f[0].fields[3].label, "Wrapped", "implicit label");
+            expect(f[1].fields[0].type + ":" + f[1].fields[0].label, "submit:unclosed", "unclosed button");
+        } else { std::cerr << "FAIL form field count " << (f.empty() ? 0 : f[0].fields.size()) << "\n"; fails++; }
+        if (o.find("visible text after") == std::string::npos) { std::cerr << "FAIL page text swallowed: " << o << "\n"; fails++; }
+    }
+    {   // select options with duplicate labels keep one entry each
+        std::vector<std::string> l; std::vector<Form> f; std::vector<FieldRef> r;
+        prepare_html("<select name=k><option value=1>--<option value=2>--<option value=3 selected>A&amp;B</select>",
+                     "https://h.com/", "TK", l, f, r);
+        expect(std::to_string(f[0].fields[0].options.size()), "3", "dup options parsed");
+        expect(f[0].fields[0].options[2].label, "A&B", "option entity");
+    }
+    {   // textarea CRLF handling, text newline stripping
+        std::vector<std::string> l; std::vector<Form> f; std::vector<FieldRef> r;
+        prepare_html("<textarea name=t>\r\nl1\r\nl2</textarea><input name=v value=\"a&#10;b\">", "https://h.com/", "TK", l, f, r);
+        expect(f[0].fields[0].value, "l1\nl2", "textarea LF");
+        expect(to_crlf(f[0].fields[0].value), "l1\r\nl2", "textarea CRLF on submit");
+        expect(f[0].fields[1].value, "ab", "text newline stripped");
+    }
+    expect(form_multipart({{"a\"b", "1"}, {"c", "x\r\ny"}}, "BND"),
+           "--BND\r\nContent-Disposition: form-data; name=\"a%22b\"\r\n\r\n1\r\n"
+           "--BND\r\nContent-Disposition: form-data; name=\"c\"\r\n\r\nx\r\ny\r\n--BND--\r\n", "multipart");
+    expect(form_text_plain({{"a", "1"}, {"b", "2"}}), "a=1\r\nb=2\r\n", "text/plain");
+    {   // huge page with many unclosed selects: linear time, content kept
+        std::string h;
+        for (int k = 0; k < 20000; k++) h += "<select name=s" + std::to_string(k) + "><option>x";
+        h += "<p>END</p>";
+        std::vector<std::string> l; std::vector<Form> f; std::vector<FieldRef> r;
+        auto t0 = std::chrono::steady_clock::now();
+        std::string o = prepare_html(h, "https://h.com/", "TK", l, f, r);
+        double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        if (o.find("END") == std::string::npos || r.size() != 20000 || sec > 3.0) {
+            std::cerr << "FAIL huge selects " << r.size() << " end=" << (o.find("END") != std::string::npos) << " " << sec << "s\n"; fails++;
+        }
+    }
+    // JS redirect scanner
+    expect(scan_js_location("var geolocation = 'Paris';"), "", "js word boundary");
+    expect(scan_js_location("if (location.href == 'x') {}"), "", "js comparison");
+    expect(scan_js_location("window.location.replace(\"https:\\/\\/a.com\\/?a=1\\u0026b=2\")"), "https://a.com/?a=1&b=2", "js replace escapes");
+    expect(scan_js_location("document.location = 'it\\'s.html'"), "it's.html", "js escaped quote");
+    expect(scan_js_location("location.assign( '/next' )"), "/next", "js assign");
+    expect(scan_js_location("location.hash = '#x'"), "", "js hash ignored");
+    {   // the std::regex version segfaulted here (deep recursion)
+        std::string js = "<script>location.href='https://a.com/" + std::string(300000, 'x') + "'</script>";
+        std::string u = find_js_redirect(js);
+        expect(u.size() ? "len" + std::to_string(u.size() > 1000) : "empty", "empty", "huge literal bounded (no crash)");
+        std::string js2 = "<script>" + std::string(2000000, 'a') + ";location='/ok'</script>";
+        expect(find_js_redirect(js2), "/ok", "huge script");
+    }
+    // redirects
+    expect(unwrap_redirector("https://duckduckgo.com/l/?uddg=https%3A%2F%2Fa.com%2Fx%00y%20z&rut=1"),
+           "https://a.com/x%00y%20z", "uddg NUL/space normalised");
+    expect(unwrap_redirector("https://duckduckgo.com/l/?uddg=https%3A%2F%2F%2Fpath"), "", "uddg no host");
+    expect(unwrap_redirector("https://duckduckgo.com/l/?uddg=https%3A%2F%2FA.COM%2F%zz"), "https://a.com/%zz", "uddg malformed pct");
+    expect(unwrap_all("https://duckduckgo.com/l/?uddg=" "https%3A%2F%2Fduckduckgo.com%2Fl%2F%3Fuddg%3Dhttps%253A%252F%252Fb.com%252F"),
+           "https://b.com/", "nested uddg");
+    expect(unwrap_redirector("https://evil.com/l/?uddg=https%3A%2F%2Fa.com"), "", "uddg only on ddg");
+    expect(unwrap_redirector("https://duckduckgo.com.evil.com/l/?uddg=https%3A%2F%2Fa.com"), "", "uddg suffix spoof");
+    {
+        int d = -7; std::string t;
+        bool ok = parse_meta_refresh("<meta http-equiv=refresh content=\"-1\">", d, t);
+        expect(ok ? "found:" + t : "none", "none", "refresh without number");
+        ok = parse_meta_refresh("<meta http-equiv=refresh content=\"99999999999999; url=/x\">", d, t);
+        expect(ok ? std::to_string(d > 5) + t : "none", "1/x", "refresh huge delay");
+        // commented-out refresh is gone after prepare_html (load_once now parses the prepared HTML)
+        std::vector<std::string> l; std::vector<Form> f; std::vector<FieldRef> r; std::string base;
+        std::string o = prepare_html("<base href=\"https://cdn.x/dir/\"><!-- <meta http-equiv=refresh content=\"0;url=/bad\"> -->"
+                                     "<script>document.write('<meta http-equiv=refresh content=0;url=/bad2>')</script>",
+                                     "https://h.com/", "TK", l, f, r, &base);
+        expect(parse_meta_refresh(o, d, t) ? t : "none", "none", "refresh in comment/script ignored");
+        expect(resolve_url(base, "next.html"), "https://cdn.x/dir/next.html", "refresh vs base");
+    }
+    // dark mode on malformed attributes
+    {
+        std::string d = apply_dark_theme("<font color=x\" bgcolor=\"y>TEXT</font>");
+        if (d.find(">TEXT") == std::string::npos) { std::cerr << "FAIL dark malformed: " << d << "\n"; fails++; }
+        expect(remove_attr("<td bgcolor=\"#fff>", "bgcolor"), "<td >", "remove_attr unclosed quote keeps >");
+    }
+    // config parsing / updating
+    expect(parse_dark_setting("\xEF\xBB\xBF# c\r\ndark = YES\r\n") ? "1" : "0", "1", "cfg bom crlf");
+    expect(parse_dark_setting("dark=1\ndark=0\n") ? "1" : "0", "0", "cfg last wins");
+    expect(parse_dark_setting("garbage\x01\xFF\ndark\n=1") ? "1" : "0", "0", "cfg corrupt");
+    expect(update_dark_setting("# hi\r\nzoom=2\ndark=0\ndark=1\n", true), "# hi\nzoom=2\ndark=1\n", "cfg preserve");
+    expect(update_dark_setting("", false), "# LiteBird settings\ndark=0\n", "cfg new");
+#ifndef _WIN32
+    {   // mkdir -p + atomic write with a deep, non-ASCII XDG_CONFIG_HOME
+        char tmpl[] = "/tmp/lbcfgXXXXXX";
+        if (mkdtemp(tmpl)) {
+            std::string deep = std::string(tmpl) + "/a/\xC3\xA9t\xC3\xA9/c";
+            setenv("XDG_CONFIG_HOME", deep.c_str(), 1);
+            save_dark_setting(true);
+            expect(load_dark_setting() ? "1" : "0", "1", "cfg deep dir write+read");
+            save_dark_setting(false);
+            expect(load_dark_setting() ? "1" : "0", "0", "cfg rewrite");
+            std::string cmd = std::string("rm -rf ") + tmpl;
+            if (std::system(cmd.c_str()) != 0) {}
+        }
+    }
+#endif
     std::cout << (fails ? "FAILED: " : "All tests passed: ") << fails << " failures\n";
     return fails ? 1 : 0;
 }

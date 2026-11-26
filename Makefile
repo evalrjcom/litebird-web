@@ -30,8 +30,9 @@ $(TARGET): $(SRC)
 	$(CXX) $(CXXFLAGS) $(FLTK_CXXFLAGS) $(CPPFLAGS) -o $@ $(SRC) $(LDFLAGS) $(LIBS)
 
 # CHANGED: unit tests for the URL / HTML / charset helpers.
+# FIX(2): the test build now honours $(CPPFLAGS) like the main build.
 tests/test_helpers: tests/test_helpers.cpp $(SRC)
-	$(CXX) $(CXXFLAGS) $(FLTK_CXXFLAGS) -o $@ tests/test_helpers.cpp $(LDFLAGS) $(LIBS)
+	$(CXX) $(CXXFLAGS) $(FLTK_CXXFLAGS) $(CPPFLAGS) -o $@ tests/test_helpers.cpp $(LDFLAGS) $(LIBS)
 
 test: tests/test_helpers
 	./tests/test_helpers

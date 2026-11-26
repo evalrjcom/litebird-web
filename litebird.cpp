@@ -10,6 +10,8 @@
 // AUDIT NOTE: every change made during the code audit is marked with a
 // "// FIX:" (bug/security/edge case) or "// CHANGED:" (behaviour/efficiency)
 // comment. See AUDIT.md for the full changelog.
+// AUDIT-2 NOTE: changes from the second audit are marked "// FIX(2):" and
+// "// CHANGED(2):"; see AUDIT-2.md.
 
 // FIX (Windows CI): <windows.h> (pulled in by FLTK/curl headers) defines min/max
 // macros that break std::min/std::max; NOMINMAX turns them off.
@@ -40,16 +42,24 @@
 #include <memory>
 #include <mutex>
 #include <random>
-#include <regex>              // FEATURE: JS redirect detection
+// CHANGED(2): <regex> removed. libstdc++'s std::regex is recursive and
+// overflowed the stack (SIGSEGV) on a `location.href='...'` literal of ~50 KB
+// with an 8 MB stack and ~6 KB with Windows' 1 MB thread stack.
+#include <map>
 #include <algorithm>
 #include <string>
 #include <thread>             // CHANGED: network fetch now runs off the UI thread
+#include <chrono>             // FIX(2): awake retry back-off
+#include <system_error>       // FIX(2): std::thread creation failure
+#include <initializer_list>
 #include <vector>
 #ifdef _WIN32
 #include <direct.h>           // FEATURE: _wmkdir for the config dir
 #else
 #include <sys/stat.h>         // FEATURE: mkdir for the config dir
 #include <sys/types.h>
+#include <unistd.h>           // FIX(2): getpid() for the temp config file name
+#include <cerrno>
 #endif
 // CHANGED: <fstream>, <unistd.h> and <windows.h> are no longer needed: the page
 // is handed to Fl_Help_View in memory, so the temp-file code (and its leaks,
@@ -195,32 +205,159 @@ std::string find_charset(const std::string& text_lower) {
     return text_lower.substr(p, e - p);
 }
 
+// FIX(2): named entities other than the five XML ones (&nbsp; &copy; &eacute;
+// ...) were shown literally in form values, <option> labels and button text.
+// The table covers the entities that actually occur on real pages.
+unsigned named_entity(const std::string& n) {
+    static const std::map<std::string, unsigned> kNamed = {
+        {"amp", '&'}, {"lt", '<'}, {"gt", '>'}, {"quot", '"'}, {"apos", '\''},
+        {"nbsp", 0xA0}, {"iexcl", 0xA1}, {"cent", 0xA2}, {"pound", 0xA3}, {"curren", 0xA4},
+        {"yen", 0xA5}, {"brvbar", 0xA6}, {"sect", 0xA7}, {"uml", 0xA8}, {"copy", 0xA9},
+        {"ordf", 0xAA}, {"laquo", 0xAB}, {"not", 0xAC}, {"shy", 0xAD}, {"reg", 0xAE},
+        {"macr", 0xAF}, {"deg", 0xB0}, {"plusmn", 0xB1}, {"sup2", 0xB2}, {"sup3", 0xB3},
+        {"acute", 0xB4}, {"micro", 0xB5}, {"para", 0xB6}, {"middot", 0xB7}, {"cedil", 0xB8},
+        {"sup1", 0xB9}, {"ordm", 0xBA}, {"raquo", 0xBB}, {"frac14", 0xBC}, {"frac12", 0xBD},
+        {"frac34", 0xBE}, {"iquest", 0xBF}, {"Agrave", 0xC0}, {"Aacute", 0xC1}, {"Acirc", 0xC2},
+        {"Atilde", 0xC3}, {"Auml", 0xC4}, {"Aring", 0xC5}, {"AElig", 0xC6}, {"Ccedil", 0xC7},
+        {"Egrave", 0xC8}, {"Eacute", 0xC9}, {"Ecirc", 0xCA}, {"Euml", 0xCB}, {"Igrave", 0xCC},
+        {"Iacute", 0xCD}, {"Icirc", 0xCE}, {"Iuml", 0xCF}, {"ETH", 0xD0}, {"Ntilde", 0xD1},
+        {"Ograve", 0xD2}, {"Oacute", 0xD3}, {"Ocirc", 0xD4}, {"Otilde", 0xD5}, {"Ouml", 0xD6},
+        {"times", 0xD7}, {"Oslash", 0xD8}, {"Ugrave", 0xD9}, {"Uacute", 0xDA}, {"Ucirc", 0xDB},
+        {"Uuml", 0xDC}, {"Yacute", 0xDD}, {"THORN", 0xDE}, {"szlig", 0xDF}, {"agrave", 0xE0},
+        {"aacute", 0xE1}, {"acirc", 0xE2}, {"atilde", 0xE3}, {"auml", 0xE4}, {"aring", 0xE5},
+        {"aelig", 0xE6}, {"ccedil", 0xE7}, {"egrave", 0xE8}, {"eacute", 0xE9}, {"ecirc", 0xEA},
+        {"euml", 0xEB}, {"igrave", 0xEC}, {"iacute", 0xED}, {"icirc", 0xEE}, {"iuml", 0xEF},
+        {"eth", 0xF0}, {"ntilde", 0xF1}, {"ograve", 0xF2}, {"oacute", 0xF3}, {"ocirc", 0xF4},
+        {"otilde", 0xF5}, {"ouml", 0xF6}, {"divide", 0xF7}, {"oslash", 0xF8}, {"ugrave", 0xF9},
+        {"uacute", 0xFA}, {"ucirc", 0xFB}, {"uuml", 0xFC}, {"yacute", 0xFD}, {"thorn", 0xFE},
+        {"yuml", 0xFF}, {"OElig", 0x152}, {"oelig", 0x153}, {"Scaron", 0x160}, {"scaron", 0x161},
+        {"Yuml", 0x178}, {"fnof", 0x192}, {"circ", 0x2C6}, {"tilde", 0x2DC}, {"ensp", 0x2002},
+        {"emsp", 0x2003}, {"thinsp", 0x2009}, {"zwnj", 0x200C}, {"zwj", 0x200D}, {"lrm", 0x200E},
+        {"rlm", 0x200F}, {"ndash", 0x2013}, {"mdash", 0x2014}, {"lsquo", 0x2018}, {"rsquo", 0x2019},
+        {"sbquo", 0x201A}, {"ldquo", 0x201C}, {"rdquo", 0x201D}, {"bdquo", 0x201E}, {"dagger", 0x2020},
+        {"Dagger", 0x2021}, {"bull", 0x2022}, {"hellip", 0x2026}, {"permil", 0x2030}, {"prime", 0x2032},
+        {"lsaquo", 0x2039}, {"rsaquo", 0x203A}, {"euro", 0x20AC}, {"trade", 0x2122}, {"larr", 0x2190},
+        {"uarr", 0x2191}, {"rarr", 0x2192}, {"darr", 0x2193}, {"harr", 0x2194}, {"minus", 0x2212},
+        {"le", 0x2264}, {"ge", 0x2265}, {"ne", 0x2260}, {"infin", 0x221E}, {"check", 0x2713}};
+    auto it = kNamed.find(n);
+    return it == kNamed.end() ? 0 : it->second;
+}
+
 // Minimal HTML entity decoder for attribute values (hrefs use &amp; a lot).
 std::string decode_entities(const std::string& s) {
+    if (s.find('&') == std::string::npos) return s;  // CHANGED(2): fast path
     std::string out;
+    out.reserve(s.size());
     for (size_t i = 0; i < s.size(); i++) {
         if (s[i] != '&') { out += s[i]; continue; }
-        size_t semi = s.find(';', i);
-        if (semi == std::string::npos || semi - i > 10) { out += s[i]; continue; }
+        // CHANGED(2): only look a few bytes ahead for ';'. The old s.find(';', i)
+        // scanned to the end of the string for every '&' (quadratic on long text).
+        size_t semi = std::string::npos;
+        for (size_t k = i + 1; k < s.size() && k <= i + 33; k++)
+            if (s[k] == ';') { semi = k; break; }
+        if (semi == std::string::npos || semi == i + 1) { out += s[i]; continue; }
         std::string ent = s.substr(i + 1, semi - i - 1);
         unsigned cp = 0;
         bool ok = true;
-        if (ent == "amp") cp = '&';
-        else if (ent == "lt") cp = '<';
-        else if (ent == "gt") cp = '>';
-        else if (ent == "quot") cp = '"';
-        else if (ent == "apos") cp = '\'';
-        else if (ent.size() > 1 && ent[0] == '#') {
-            char* end = nullptr;
-            unsigned long v = (ent[1] == 'x' || ent[1] == 'X')
-                                  ? std::strtoul(ent.c_str() + 2, &end, 16)
-                                  : std::strtoul(ent.c_str() + 1, &end, 10);
-            ok = end && *end == '\0' && v > 0 && v <= 0x10FFFF;
-            cp = (unsigned)v;
-        } else ok = false;
+        if (ent.size() > 1 && ent[0] == '#') {
+            bool hex = ent[1] == 'x' || ent[1] == 'X';
+            const char* digits = ent.c_str() + (hex ? 2 : 1);
+            // FIX(2): strtoul accepted "&# 65;" / "&#+65;" and wrapped "&#-1;".
+            ok = *digits != '\0';
+            unsigned long v = 0;
+            for (const char* d = digits; ok && *d; d++) {
+                int dv = std::isdigit((unsigned char)*d) ? *d - '0'
+                         : (hex && std::isxdigit((unsigned char)*d)) ? (std::tolower((unsigned char)*d) - 'a' + 10)
+                                                                      : -1;
+                if (dv < 0) ok = false;
+                else if (v <= 0x10FFFF) v = v * (hex ? 16 : 10) + (unsigned long)dv;
+            }
+            if (ok) {
+                // FIX(2): HTML maps &#128;..&#159; through Windows-1252 (&#150; is an
+                // en dash, not a C1 control), and &#0;, surrogates and out-of-range
+                // values become U+FFFD instead of emitting invalid UTF-8 / NUL.
+                if (v >= 0x80 && v <= 0x9F) v = cp1252_to_cp((unsigned char)v);
+                else if (v == 0 || v > 0x10FFFF || (v >= 0xD800 && v <= 0xDFFF)) v = 0xFFFD;
+                cp = (unsigned)v;
+            }
+        } else {
+            cp = named_entity(ent);
+            ok = cp != 0;
+        }
         if (!ok) { out += s[i]; continue; }
         append_utf8(out, cp);
         i = semi;
+    }
+    return out;
+}
+
+// FIX(2): captions / placeholder values were cut with substr(0, N), which can
+// split a multi-byte UTF-8 character and hand FLTK invalid UTF-8 (drawn as
+// garbage boxes). Cuts at a character boundary, at most `max_chars` characters.
+std::string utf8_truncate(const std::string& s, size_t max_chars, const char* ellipsis = "...") {
+    size_t chars = 0, i = 0;
+    while (i < s.size()) {
+        if (chars == max_chars) return s.substr(0, i) + ellipsis;
+        unsigned char c = (unsigned char)s[i];
+        size_t n = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 1;
+        i = std::min(s.size(), i + n);
+        chars++;
+    }
+    return s;
+}
+
+// FIX(2): a UTF-16 page (BOM FF FE / FE FF) was shown as garbage with every
+// other byte dropped, and a UTF-8 BOM was passed into the view. Returns the
+// body re-encoded as UTF-8 and true when a BOM was found.
+bool decode_bom(const std::string& in, std::string& out) {
+    if (in.size() >= 3 && (unsigned char)in[0] == 0xEF && (unsigned char)in[1] == 0xBB &&
+        (unsigned char)in[2] == 0xBF) {
+        out = in.substr(3);
+        return true;
+    }
+    if (in.size() < 2) return false;
+    unsigned char b0 = (unsigned char)in[0], b1 = (unsigned char)in[1];
+    bool le = b0 == 0xFF && b1 == 0xFE, be = b0 == 0xFE && b1 == 0xFF;
+    if (!le && !be) return false;
+    out.clear();
+    out.reserve(in.size());
+    for (size_t i = 2; i + 1 < in.size(); i += 2) {
+        unsigned u = le ? ((unsigned char)in[i] | ((unsigned char)in[i + 1] << 8))
+                        : (((unsigned char)in[i] << 8) | (unsigned char)in[i + 1]);
+        if (u >= 0xD800 && u <= 0xDBFF && i + 3 < in.size()) {
+            unsigned lo = le ? ((unsigned char)in[i + 2] | ((unsigned char)in[i + 3] << 8))
+                             : (((unsigned char)in[i + 2] << 8) | (unsigned char)in[i + 3]);
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                u = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00);
+                i += 2;
+            } else u = 0xFFFD;
+        } else if (u >= 0xD800 && u <= 0xDFFF) u = 0xFFFD;
+        if (u == 0) continue;
+        append_utf8(out, u);
+    }
+    return true;
+}
+
+// FIX(2): forms on Windows-1252 / Latin-1 pages must be submitted in the page's
+// encoding (the server decodes the bytes with it); LiteBird always sent UTF-8,
+// so "café" arrived as "cafÃ©". Characters with no 1252 byte are sent as
+// "&#NNNN;" like every browser does.
+std::string utf8_to_cp1252(const std::string& s) {
+    std::string out;
+    for (size_t i = 0; i < s.size();) {
+        size_t n = utf8_seq_len(s, i);
+        if (n == 0) { out += '?'; i++; continue; }
+        unsigned cp = (unsigned char)s[i];
+        if (n > 1) {
+            cp = (unsigned char)s[i] & (0xFF >> (n + 1));
+            for (size_t k = 1; k < n; k++) cp = (cp << 6) | ((unsigned char)s[i + k] & 0x3F);
+        }
+        i += n;
+        if (cp < 0x80 || (cp >= 0xA0 && cp <= 0xFF)) { out += (char)cp; continue; }
+        int b = -1;
+        for (int k = 0; k < 32; k++) if (kCp1252[k] == cp) { b = 0x80 + k; break; }
+        if (b >= 0) out += (char)b;
+        else out += "&#" + std::to_string(cp) + ";";
     }
     return out;
 }
@@ -465,9 +602,19 @@ AttrSpan find_attr(const std::string& tag, const char* name) {
         if (i < tag.size() && (tag[i] == '"' || tag[i] == '\'')) {
             char q = tag[i];
             size_t close = tag.find(q, i + 1);
-            if (close == std::string::npos) close = tag.size() - 1;
-            val = tag.substr(i + 1, close - i - 1);
-            ve = close + 1;
+            // FIX(2): with an unclosed quote the value ran to the end of the tag
+            // *including* its '>', so remove_attr() (dark mode) erased the '>'
+            // and the following page text was swallowed into the tag. The value
+            // now stops before a trailing '>' and that '>' is never removed.
+            if (close == std::string::npos) {
+                size_t lim = tag.size();
+                if (lim > i + 1 && tag[lim - 1] == '>') lim--;
+                val = tag.substr(i + 1, lim - i - 1);
+                ve = lim;
+            } else {
+                val = tag.substr(i + 1, close - i - 1);
+                ve = close + 1;
+            }
         } else {
             while (i < tag.size() && !std::isspace((unsigned char)tag[i]) && tag[i] != '>') i++;
             val = tag.substr(vs, i - vs);
@@ -548,14 +695,65 @@ struct FormField {
     std::string name, value, label;
     std::vector<FormOption> options;
     bool checked = false, disabled = false;
+    bool image = false;      // FIX(2): <input type=image> submits name.x / name.y
+    bool autofocus = false;  // FIX(2): honour autofocus instead of always focusing field #1
     int size = 0;
 };
 
 struct Form {
     std::string action;           // absolute URL
     std::string method = "get";   // "get" or "post"
+    // FIX(2): enctype was ignored, so multipart/form-data forms (most upload-less
+    // contact/login forms on PHP sites still use it) got an urlencoded body the
+    // server could not parse. Values: "urlencoded", "multipart", "text".
+    std::string enctype = "urlencoded";
+    bool single_byte = false;     // FIX(2): page/accept-charset is Windows-1252 / Latin-1
     std::vector<FormField> fields;
 };
+
+// FIX(2): HTML spec "normalize newlines" for textarea values (CRLF on the wire).
+std::string to_crlf(const std::string& s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '\r') { out += "\r\n"; if (i + 1 < s.size() && s[i + 1] == '\n') i++; }
+        else if (s[i] == '\n') out += "\r\n";
+        else out += s[i];
+    }
+    return out;
+}
+
+// FIX(2): multipart/form-data body (RFC 7578). Names are escaped as the HTML
+// spec requires (" -> %22, CR -> %0D, LF -> %0A) so a field name containing a
+// quote cannot break out of the Content-Disposition header.
+std::string multipart_escape(const std::string& s) {
+    std::string o;
+    for (char c : s) {
+        if (c == '"') o += "%22";
+        else if (c == '\r') o += "%0D";
+        else if (c == '\n') o += "%0A";
+        else o += c;
+    }
+    return o;
+}
+
+std::string form_multipart(const std::vector<std::pair<std::string, std::string>>& kv,
+                           const std::string& boundary) {
+    std::string out;
+    for (auto& p : kv) {
+        out += "--" + boundary + "\r\n";
+        out += "Content-Disposition: form-data; name=\"" + multipart_escape(p.first) + "\"\r\n\r\n";
+        out += p.second + "\r\n";
+    }
+    out += "--" + boundary + "--\r\n";
+    return out;
+}
+
+// text/plain enctype (HTML spec): "name=value" lines, CRLF separated.
+std::string form_text_plain(const std::vector<std::pair<std::string, std::string>>& kv) {
+    std::string out;
+    for (auto& p : kv) out += p.first + "=" + p.second + "\r\n";
+    return out;
+}
 
 struct FieldRef { int form, field; };
 
@@ -579,18 +777,20 @@ std::string form_urlencode(const std::vector<std::pair<std::string, std::string>
     return out;
 }
 
-// GET submission target: action URL with its query/fragment replaced.
+// GET submission target: action URL with its query replaced.
+// FIX(2): the HTML spec keeps the action's #fragment ("mutate action URL");
+// it used to be dropped, so forms targeting "results#top" lost the anchor.
 std::string form_get_url(const std::string& action, const std::string& encoded) {
-    std::string u = strip_fragment(action, nullptr);
+    std::string frag;
+    std::string u = strip_fragment(action, &frag);
     size_t q = u.find('?');
     if (q != std::string::npos) u.erase(q);
-    return u + "?" + encoded;
+    return u + "?" + encoded + (action.find('#') != std::string::npos ? "#" + frag : "");
 }
 
 std::string field_caption(const FormField& f) {
     std::string c = !f.label.empty() ? f.label : f.name;
-    if (c.size() > 24) c = c.substr(0, 24) + "...";
-    return c;
+    return utf8_truncate(c, 24);  // FIX(2): UTF-8 safe
 }
 
 // Inline placeholder shown in the page for control `idx` (flat index).
@@ -606,7 +806,7 @@ std::string field_placeholder(const FormField& f, const std::string& token, size
         text = "[" + field_caption(f) + ": " + sel + " v]";
     } else {
         std::string v = f.type == "password" ? std::string(f.value.size(), '*') : f.value;
-        if (v.size() > 20) v = v.substr(0, 20) + "...";
+        v = utf8_truncate(v, 20);  // FIX(2): UTF-8 safe
         text = "[" + field_caption(f) + ": " + (v.empty() ? "________" : v) + "]";
     }
     return "<a href=\"" + href + "\"><tt>" + html_escape(text) + "</tt></a> ";
@@ -621,19 +821,58 @@ std::string field_placeholder(const FormField& f, const std::string& token, size
 // resolved URL is kept in `links` and only followed on a genuine click.
 // CHANGED: <script>/<style> bodies are dropped (Fl_Help_View rendered them as text).
 // FEATURE: form controls are extracted into `forms`/`refs` (see above).
+// FIX(2): earliest of several tags (e.g. "</select", "</form", "<select") at
+// or after p, used to bound elements whose closing tag is missing. Before, an
+// unclosed <select>/<button> swallowed the rest of the page (and with many of
+// them every one rescanned to the end: quadratic on huge pages).
+size_t find_first_tag(const std::string& h, size_t p, std::initializer_list<const char*> tags) {
+    for (size_t j = h.find('<', p); j != std::string::npos; j = h.find('<', j + 1))
+        for (const char* t : tags)
+            if (ieq_prefix(h, j, t)) {
+                size_t n = std::strlen(t);  // whole tag name only ("<select" != "<selected")
+                if (j + n >= h.size() || !std::isalnum((unsigned char)h[j + n])) return j;
+            }
+    return std::string::npos;
+}
+
+// FIX(2): <label for="id">Text</label> captions. Pre-scan so labels that come
+// before or after their control both work.
+std::map<std::string, std::string> collect_labels(const std::string& html) {
+    std::map<std::string, std::string> m;
+    for (size_t i = html.find('<'); i != std::string::npos && m.size() < 2000; i = html.find('<', i + 1)) {
+        if (!ieq_prefix(html, i, "<label")) continue;
+        size_t gt = find_tag_end(html, i);
+        if (gt == std::string::npos) break;
+        std::string tag = html.substr(i, gt - i + 1);
+        if (tag_name(tag) != "label") continue;
+        std::string id = attr(tag, "for");
+        size_t ce = find_first_tag(html, gt + 1, {"</label", "<label", "</form"});
+        size_t end = ce == std::string::npos ? std::min(html.size(), gt + 1 + 512) : ce;
+        if (!id.empty() && !m.count(id)) m[id] = trim(strip_tags(html.substr(gt + 1, std::min<size_t>(end - gt - 1, 2048))));
+        i = gt;
+    }
+    return m;
+}
+
+// CHANGED(2): optional outputs `base_out` (final <base href>, needed to resolve
+// a relative meta refresh) and `single_byte` (page encoding, for form submission).
 std::string prepare_html(const std::string& html, const std::string& doc_url,
                          const std::string& token, std::vector<std::string>& links,
-                         std::vector<Form>& forms, std::vector<FieldRef>& refs) {
+                         std::vector<Form>& forms, std::vector<FieldRef>& refs,
+                         std::string* base_out = nullptr, bool single_byte = false) {
     std::string out;
     out.reserve(html.size() + 1024);
     std::string base = doc_url;
     int cur_form = -1, orphan_form = -1;
+    const std::map<std::string, std::string> labels = collect_labels(html);
+    size_t label_open = std::string::npos;  // FIX(2): <label>Text <input></label> captions
     auto form_for_control = [&]() -> int {
         if (cur_form >= 0) return cur_form;
         // Controls outside any <form>: collect them in one implicit GET form.
         if (orphan_form < 0) {
             Form f;
             f.action = strip_fragment(doc_url, nullptr);
+            f.single_byte = single_byte;
             forms.push_back(f);
             orphan_form = (int)forms.size() - 1;
         }
@@ -645,8 +884,13 @@ std::string prepare_html(const std::string& html, const std::string& doc_url,
         refs.push_back({fi, (int)forms[fi].fields.size() - 1});
         if (f.type != "hidden") out += field_placeholder(f, token, refs.size() - 1);
     };
-    auto label_of = [](const std::string& tag) {
-        std::string l = attr(tag, "placeholder");
+    auto label_of = [&](const std::string& tag, size_t tag_pos) {
+        std::string l;
+        std::string id = attr(tag, "id");
+        if (!id.empty()) { auto it = labels.find(id); if (it != labels.end()) l = it->second; }
+        if (l.empty() && label_open != std::string::npos && tag_pos > label_open)
+            l = strip_tags(html.substr(label_open, std::min<size_t>(tag_pos - label_open, 2048)));
+        if (l.empty()) l = attr(tag, "placeholder");
         if (l.empty()) l = attr(tag, "aria-label");
         if (l.empty()) l = attr(tag, "title");
         return trim(l);
@@ -685,11 +929,26 @@ std::string prepare_html(const std::string& html, const std::string& doc_url,
                           std::to_string(links.size() - 1) + "\"" + tag.substr(a.end);
                 }
             }
+        } else if (name == "label") {
+            label_open = i;  // FIX(2): implicit label association
+        } else if (name == "/label") {
+            label_open = std::string::npos;
         } else if (name == "form") {
+            // FIX(2): a nested <form> start tag is ignored by HTML parsers (its
+            // controls belong to the outer form). It used to start a new form, so
+            // those controls were submitted to the inner action / method instead.
+            if (cur_form >= 0) continue;
             Form f;
             std::string act = clean_href(attr(tag, "action"));
             f.action = act.empty() ? strip_fragment(doc_url, nullptr) : resolve_url(base, act);
             f.method = to_lower(trim(attr(tag, "method"))) == "post" ? "post" : "get";
+            std::string et = to_lower(trim(attr(tag, "enctype")));
+            if (et == "multipart/form-data") f.enctype = "multipart";
+            else if (et == "text/plain") f.enctype = "text";
+            // FIX(2): accept-charset overrides the page encoding for submission.
+            std::string ac = to_lower(trim(attr(tag, "accept-charset")));
+            f.single_byte = ac.empty() ? single_byte : (ac.find("utf-8") == std::string::npos &&
+                                                        is_single_byte_charset(ac.substr(0, ac.find_first_of(" ,"))));
             forms.push_back(f);
             cur_form = (int)forms.size() - 1;
             continue;  // the tag itself is dropped
@@ -704,8 +963,10 @@ std::string prepare_html(const std::string& html, const std::string& doc_url,
             f.value = attr(tag, "value", &has_value);
             f.checked = find_attr(tag, "checked").found;
             f.disabled = find_attr(tag, "disabled").found;
-            f.label = label_of(tag);
-            f.size = std::atoi(attr(tag, "size").c_str());
+            f.autofocus = find_attr(tag, "autofocus").found;
+            f.label = label_of(tag, lt);
+            // FIX(2): atoi() on "size=99999999999" is undefined behaviour.
+            f.size = (int)std::min(200L, std::max(0L, std::strtol(attr(tag, "size").c_str(), nullptr, 10)));
             if (type == "hidden") f.type = "hidden";
             else if (type == "password") f.type = "password";
             else if (type == "checkbox" || type == "radio") {
@@ -713,23 +974,40 @@ std::string prepare_html(const std::string& html, const std::string& doc_url,
                 if (!has_value) f.value = "on";
             } else if (type == "submit" || type == "image") {
                 f.type = "submit";
-                if (!has_value) f.value = "Submit";
-                f.label.clear();
+                f.image = type == "image";
+                if (f.image) {
+                    std::string alt = attr(tag, "alt");
+                    f.label = alt.empty() ? (f.name.empty() ? "Submit" : f.name) : alt;
+                } else {
+                    if (!has_value) f.value = "Submit";
+                    f.label.clear();
+                }
             } else if (type == "button" || type == "reset" || type == "file") {
                 continue;  // no scripting / no uploads: nothing useful to render
             } else f.type = "text";  // text, search, email, url, tel, number, date, ...
+            // FIX(2): HTML strips CR/LF from single-line values; an embedded
+            // newline would otherwise be submitted.
+            if (f.type == "text" || f.type == "password" || f.type == "hidden") {
+                if (f.type != "hidden") f.value.erase(std::remove_if(f.value.begin(), f.value.end(),
+                                                      [](char c) { return c == '\r' || c == '\n'; }), f.value.end());
+            }
             add_field(f);
             continue;
         } else if (name == "textarea") {
             FormField f;
             f.type = "textarea";
             f.name = attr(tag, "name");
-            f.label = label_of(tag);
+            f.label = label_of(tag, lt);
             f.disabled = find_attr(tag, "disabled").found;
+            f.autofocus = find_attr(tag, "autofocus").found;
             size_t ce = find_close_tag(html, i, "</textarea");
             std::string inner = html.substr(i, (ce == std::string::npos ? html.size() : ce) - i);
+            if (!inner.empty() && inner[0] == '\r') inner.erase(0, 1);  // FIX(2): CRLF after <textarea>
             if (!inner.empty() && inner[0] == '\n') inner.erase(0, 1);
             f.value = decode_entities(inner);
+            // FIX(2): CRLF -> LF for the editor (FLTK showed the CR as a box);
+            // submission converts back to CRLF (to_crlf).
+            f.value.erase(std::remove(f.value.begin(), f.value.end(), '\r'), f.value.end());
             i = after_close_tag(html, ce);
             add_field(f);
             continue;
@@ -737,9 +1015,13 @@ std::string prepare_html(const std::string& html, const std::string& doc_url,
             FormField f;
             f.type = "select";
             f.name = attr(tag, "name");
-            f.label = label_of(tag);
+            f.label = label_of(tag, lt);
             f.disabled = find_attr(tag, "disabled").found;
-            size_t ce = find_close_tag(html, i, "</select");
+            // FIX(2): bound an unclosed <select> by the tags that implicitly close
+            // it (HTML: <select>, <input>, <textarea>) and by </form>; before, it
+            // took every <option> until the end of the page and hid all content.
+            size_t ce = find_first_tag(html, i, {"</select", "<select", "<input", "<textarea", "</form"});
+            bool real_close = ce != std::string::npos && ieq_prefix(html, ce, "</select");
             size_t end = (ce == std::string::npos) ? html.size() : ce;
             size_t j = i;
             while (j < end) {
@@ -748,8 +1030,15 @@ std::string prepare_html(const std::string& html, const std::string& doc_url,
                 size_t og = find_tag_end(html, o);
                 if (og == std::string::npos || og >= end) break;
                 std::string ot = html.substr(o, og - o + 1);
+                std::string otn = tag_name(ot);
+                // FIX(2): a <select> with no closer at all ends at the first tag
+                // that cannot be inside it, so the page after it stays visible.
+                if (!real_close && otn != "option" && otn != "/option" && otn != "optgroup" && otn != "/optgroup") {
+                    end = o;
+                    break;
+                }
                 j = og + 1;
-                if (tag_name(ot) != "option") continue;
+                if (otn != "option") continue;
                 size_t next = html.find('<', j);
                 if (next == std::string::npos || next > end) next = end;
                 FormOption opt;
@@ -763,26 +1052,34 @@ std::string prepare_html(const std::string& html, const std::string& doc_url,
             bool any = false;  // exactly one option selected (first wins, default first)
             for (auto& o : f.options) if (o.selected) { if (any) o.selected = false; any = true; }
             if (!any && !f.options.empty()) f.options[0].selected = true;
-            i = after_close_tag(html, ce);
+            i = real_close ? after_close_tag(html, ce) : end;  // FIX(2): re-parse the implicit closer
             add_field(f);
             continue;
         } else if (name == "button") {
-            size_t ce = find_close_tag(html, i, "</button");
-            std::string inner = html.substr(i, (ce == std::string::npos ? html.size() : ce) - i);
-            i = after_close_tag(html, ce);
+            // FIX(2): an unclosed <button> swallowed the rest of the page as its label.
+            size_t ce = find_first_tag(html, i, {"</button", "<button", "</form"});
+            bool real_close = ce != std::string::npos && ieq_prefix(html, ce, "</button");
+            size_t end = ce;
+            if (end == std::string::npos) end = html.find('<', i);  // no closer at all: text up to the next tag
+            if (end == std::string::npos) end = html.size();
+            std::string inner = html.substr(i, end - i);
+            i = real_close ? after_close_tag(html, ce) : end;
             std::string type = to_lower(trim(attr(tag, "type")));
             if (!type.empty() && type != "submit") continue;
             FormField f;
             f.type = "submit";
             f.name = attr(tag, "name");
             f.value = attr(tag, "value");
-            f.label = strip_tags(inner);  // visible text; `value` is what gets submitted
+            f.label = utf8_truncate(strip_tags(inner), 60);  // visible text; `value` is what gets submitted
             if (f.label.empty()) f.label = f.value.empty() ? "Submit" : f.value;
+            f.autofocus = find_attr(tag, "autofocus").found;
+            f.disabled = find_attr(tag, "disabled").found;  // FIX(2): disabled buttons were clickable
             add_field(f);
             continue;
         }
         out += tag;
     }
+    if (base_out) *base_out = base;
     return out;
 }
 
@@ -842,7 +1139,26 @@ std::string unwrap_redirector(const std::string& url) {
     std::string path = parse_url(url).path;
     if (path != "/l/" && path != "/l") return "";
     std::string target = trim(query_param(url, "uddg"));
-    return is_http_scheme(target) ? target : "";
+    if (!is_http_scheme(target)) return "";
+    // FIX(2): the decoded target went to curl as-is. "%00" decoded to a NUL
+    // (curl silently used the URL up to the NUL, not what was shown), and
+    // decoded spaces / control bytes / "%zz" made curl fail with "bad URL".
+    // It is now normalised exactly like typed input (control bytes and spaces
+    // re-encoded, host lower-cased, no-host URLs rejected).
+    std::string err;
+    return normalize_user_url(target, err);
+}
+
+// FIX(2): uddg targets can themselves be DDG redirector links (seen with ads);
+// unwrap a bounded number of levels instead of exactly one.
+std::string unwrap_all(const std::string& url) {
+    std::string cur = url;
+    for (int k = 0; k < 4; k++) {
+        std::string u = unwrap_redirector(cur);
+        if (u.empty() || u == cur) break;
+        cur = u;
+    }
+    return cur == url ? std::string() : cur;
 }
 
 // FIX: <meta http-equiv="refresh" content="0; url=..."> was ignored.
@@ -859,7 +1175,13 @@ bool parse_meta_refresh(const std::string& html, int& delay, std::string& target
         std::string c = trim(attr(tag, "content"));
         size_t k = 0;
         while (k < c.size() && (std::isdigit((unsigned char)c[k]) || c[k] == '.')) k++;
-        int d = std::atoi(c.substr(0, k).c_str());
+        // FIX(2): content="-1" / "abc" (no leading number) is invalid per the HTML
+        // spec but was treated as "redirect to ./-1 now"; and atoi() overflow on
+        // content="99999999999; url=..." is undefined behaviour (could go negative
+        // and redirect instantly). The delay is now parsed safely and clamped.
+        if (k == 0 || c[0] == '.') continue;
+        long ld = std::strtol(c.substr(0, std::min<size_t>(k, 9)).c_str(), nullptr, 10);
+        int d = (int)std::min(ld, 86400L);
         while (k < c.size() && (std::isspace((unsigned char)c[k]) || c[k] == ';' || c[k] == ',')) k++;
         if (ieq_prefix(c, k, "url")) {
             size_t m = k + 3;
@@ -883,12 +1205,72 @@ bool parse_meta_refresh(const std::string& html, int& delay, std::string& target
     return false;
 }
 
+// FIX(2): hand-written replacement for the two std::regex patterns.
+//  * no recursion: the regexes crashed the worker thread on long literals;
+//  * word boundary: "geolocation = 'Paris'" or "mylocation='x'" matched and
+//    sent the browser to ./Paris;
+//  * "location.href == 'x'" (a comparison) is not an assignment;
+//  * the string literal is read with JS escapes (\' \" \/ \xNN \uNNNN).
+// Returns the first redirect target in `js`, or "".
+std::string scan_js_location(const std::string& js) {
+    auto ident = [](char c) { return std::isalnum((unsigned char)c) || c == '_' || c == '$'; };
+    auto skip_ws = [&](size_t p) { while (p < js.size() && std::isspace((unsigned char)js[p])) p++; return p; };
+    auto read_literal = [&](size_t p, std::string& outv) -> bool {
+        if (p >= js.size() || (js[p] != '\'' && js[p] != '"')) return false;
+        char q = js[p++];
+        std::string v;
+        for (; p < js.size() && v.size() < 8192; p++) {
+            char c = js[p];
+            if (c == q) { outv = v; return !v.empty(); }
+            if (c == '\n') return false;
+            if (c == '\\' && p + 1 < js.size()) {
+                char e = js[++p];
+                auto hexval = [&](size_t at, int n, unsigned& cp) {
+                    if (at + n > js.size()) return false;
+                    cp = 0;
+                    for (int k = 0; k < n; k++) {
+                        char h = js[at + k];
+                        if (!std::isxdigit((unsigned char)h)) return false;
+                        cp = cp * 16 + (unsigned)(std::isdigit((unsigned char)h) ? h - '0' : std::tolower((unsigned char)h) - 'a' + 10);
+                    }
+                    return true;
+                };
+                unsigned cp = 0;
+                if (e == 'x' && hexval(p + 1, 2, cp)) { append_utf8(v, cp ? cp : 0xFFFD); p += 2; }
+                else if (e == 'u' && hexval(p + 1, 4, cp)) {
+                    append_utf8(v, (cp == 0 || (cp >= 0xD800 && cp <= 0xDFFF)) ? 0xFFFD : cp);
+                    p += 4;
+                } else v += e;  // \/ \' \" \\ and anything else: the character itself
+                continue;
+            }
+            v += c;
+        }
+        return false;
+    };
+    for (size_t i = js.find("location"); i != std::string::npos; i = js.find("location", i + 1)) {
+        if (i > 0 && ident(js[i - 1])) continue;                    // "geolocation"
+        size_t p = i + 8;
+        if (p < js.size() && ident(js[p])) continue;                // "locationbar"
+        std::string v;
+        if (js.compare(p, 5, ".href") == 0 && !(p + 5 < js.size() && ident(js[p + 5]))) p += 5;
+        else if (js.compare(p, 8, ".replace") == 0 || js.compare(p, 7, ".assign") == 0) {
+            p += js[p + 1] == 'r' ? 8 : 7;
+            p = skip_ws(p);
+            if (p < js.size() && js[p] == '(' && read_literal(skip_ws(p + 1), v)) return v;
+            continue;
+        }
+        p = skip_ws(p);
+        if (p < js.size() && js[p] == '=' && !(p + 1 < js.size() && js[p + 1] == '=') &&
+            read_literal(skip_ws(p + 1), v))
+            return v;
+    }
+    return "";
+}
+
 // FEATURE: simple JavaScript redirects (window.location = "...",
 // location.href = '...', location.replace("..."), location.assign(...)).
 // Only the contents of <script> blocks are searched.
 std::string find_js_redirect(const std::string& html) {
-    static const std::regex assign_re(R"(location(?:\.href)?\s*=\s*(['"])([^'"]+)\1)");
-    static const std::regex call_re(R"(location\.(?:replace|assign)\(\s*(['"])([^'"]+)\1)");
     size_t i = 0;
     while ((i = html.find('<', i)) != std::string::npos) {
         if (!ieq_prefix(html, i, "<script")) { i++; continue; }
@@ -896,32 +1278,27 @@ std::string find_js_redirect(const std::string& html) {
         if (gt == std::string::npos) break;
         size_t ce = find_close_tag(html, gt + 1, "</script");
         std::string js = html.substr(gt + 1, (ce == std::string::npos ? html.size() : ce) - gt - 1);
-        std::smatch m;
-        std::string u;
-        if (std::regex_search(js, m, call_re) || std::regex_search(js, m, assign_re)) u = m[2].str();
-        if (!u.empty()) {
-            std::string r;  // undo the usual JS string escapes
-            for (size_t k = 0; k < u.size(); k++) {
-                if (u[k] == '\\' && k + 1 < u.size() && u[k + 1] == '/') { r += '/'; k++; }
-                else if (u.compare(k, 6, "\\u0026") == 0) { r += '&'; k += 5; }
-                else r += u[k];
-            }
-            return r;
-        }
+        std::string u = scan_js_location(js);  // CHANGED(2): no std::regex
+        if (!u.empty()) return u;
         if (ce == std::string::npos) break;
         i = ce + 1;
     }
     return "";
 }
 
-// Number of visible, non-space characters (scripts/styles/tags removed).
-size_t visible_text_len(const std::string& html) {
-    std::vector<std::string> l;
-    std::vector<Form> f;
-    std::vector<FieldRef> r;
-    std::string body = prepare_html(html, "http://x/", "t", l, f, r);
+// Number of visible, non-space characters of already prepared HTML.
+// CHANGED(2): load_once() used to run the whole prepare_html() pass twice per
+// page (once here, once for display); it now counts the prepared output.
+// Form placeholders ("[q: ____]") are counted too, but they are short, so a
+// search box alone does not stop a redirect page from being recognised.
+size_t visible_text_len_prepared(const std::string& prepared) {
     size_t n = 0;
-    for (char c : strip_tags(body)) if (!std::isspace((unsigned char)c)) n++;
+    bool in_tag = false;
+    for (char c : prepared) {
+        if (c == '<') in_tag = true;
+        else if (c == '>') in_tag = false;
+        else if (!in_tag && !std::isspace((unsigned char)c)) n++;
+    }
     return n;
 }
 
@@ -982,8 +1359,9 @@ public:
     // returns a structured result instead of an HTML string, so callers can see
     // the content type and the final URL after redirects.
     // FEATURE: optional POST body (application/x-www-form-urlencoded) for forms.
+    // FIX(2): `post_type` sets the request Content-Type (multipart / text/plain forms).
     static FetchResult fetch(const std::string& url, const std::atomic<bool>* cancel, bool insecure,
-                             const std::string* post_body = nullptr) {
+                             const std::string* post_body = nullptr, const std::string& post_type = "") {
         FetchResult r;
         r.effective_url = url;
         // FIX: RAII for the easy handle so it is released even if an exception
@@ -1008,11 +1386,19 @@ public:
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);          // FIX: required when libcurl is used from threads
         curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");   // CHANGED: accept gzip/deflate/br -> less data
         curl_easy_setopt(curl, CURLOPT_USERAGENT, "LiteBird/1.2 (Ladybird-inspired)");
+        std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> headers(nullptr, &curl_slist_free_all);
         if (post_body) {
             // FEATURE: form POST. COPYPOSTFIELDS gives curl its own copy; curl sets the
             // urlencoded Content-Type and switches to GET after a 301/302/303 redirect.
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)post_body->size());
+            // CHANGED(2): _LARGE variant (the long cast truncates on 32-bit Windows/i386
+            // for bodies > 2 GB; cheap to get right).
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)post_body->size());
             curl_easy_setopt(curl, CURLOPT_COPYPOSTFIELDS, post_body->c_str());
+            if (!post_type.empty()) {
+                curl_slist* l = curl_slist_append(nullptr, ("Content-Type: " + post_type).c_str());
+                headers.reset(l);
+                if (l) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, l);
+            }
         }
         // FIX (security): only http/https, for the first request and for redirects.
         // Without this a page could redirect into other curl protocols.
@@ -1101,6 +1487,17 @@ struct Page {
     std::string redirect_to;       // FEATURE: meta-refresh / JS redirect target, if any
     bool from_post = false;        // result of a form POST (always a new history entry)
     bool is_error = false;
+    // CHANGED(2): approximate heap size, for the page-cache byte budget.
+    size_t bytes() const {
+        size_t n = html.size() + url.size() + redirect_to.size() + sizeof(Page);
+        for (auto& l : links) n += l.size() + sizeof(std::string);
+        for (auto& f : forms)
+            for (auto& fd : f.fields) {
+                n += sizeof(FormField) + fd.name.size() + fd.value.size() + fd.label.size();
+                for (auto& o : fd.options) n += sizeof(FormOption) + o.value.size() + o.label.size();
+            }
+        return n + refs.size() * sizeof(FieldRef);
+    }
 };
 
 const int kMaxSoftRedirects = 5;
@@ -1114,16 +1511,29 @@ public:
     // FEATURE: follows DDG /l/?uddg= links, <meta refresh> (delay <= 5 s) and
     // simple JS redirects on near-empty pages, up to kMaxSoftRedirects hops.
     static Page load(const std::string& url, const std::string* post, const std::atomic<bool>* cancel,
-                     bool insecure, const std::string& token) {
+                     bool insecure, const std::string& token, const std::string& post_type = "") {
         std::string cur = url;
         Page pg;
+        std::vector<std::string> seen;  // FIX(2): A -> B -> A loops stop at once
         for (int hop = 0;; hop++) {
-            std::string unwrapped = unwrap_redirector(cur);
+            std::string unwrapped = unwrap_all(cur);
             if (!unwrapped.empty()) cur = unwrapped;
-            pg = load_once(cur, hop == 0 ? post : nullptr, cancel, insecure, token);
-            if (pg.is_error || pg.redirect_to.empty() || hop >= kMaxSoftRedirects) break;
+            seen.push_back(strip_fragment(cur, nullptr));
+            pg = load_once(cur, hop == 0 ? post : nullptr, cancel, insecure, token, post_type);
+            if (pg.is_error || pg.redirect_to.empty()) break;
             if (cancel && cancel->load()) break;
-            if (strip_fragment(pg.redirect_to, nullptr) == strip_fragment(pg.url, nullptr)) break;  // self-refresh
+            std::string next = strip_fragment(pg.redirect_to, nullptr);
+            if (next == strip_fragment(pg.url, nullptr)) break;  // self-refresh
+            if (std::find(seen.begin(), seen.end(), next) != seen.end() || hop >= kMaxSoftRedirects) {
+                // FIX(2): the limit used to be hit silently, leaving the user on a
+                // blank interstitial with no explanation.
+                pg.html = error_page("This page keeps redirecting (loop or more than " +
+                                         std::to_string(kMaxSoftRedirects) + " soft redirects).",
+                                     pg.redirect_to);
+                pg.links.clear(); pg.forms.clear(); pg.refs.clear();
+                pg.is_error = true;
+                break;
+            }
             cur = pg.redirect_to;
         }
         pg.from_post = post != nullptr;
@@ -1132,10 +1542,10 @@ public:
 
 private:
     static Page load_once(const std::string& url, const std::string* post, const std::atomic<bool>* cancel,
-                          bool insecure, const std::string& token) {
+                          bool insecure, const std::string& token, const std::string& post_type) {
         Page pg;
         std::string fetch_url = strip_fragment(url, &pg.fragment);  // FIX: never send #fragment to the server
-        FetchResult r = NetworkFetcher::fetch(fetch_url, cancel, insecure, post);
+        FetchResult r = NetworkFetcher::fetch(fetch_url, cancel, insecure, post, post_type);
         pg.url = r.effective_url + (pg.fragment.empty() ? "" : "#" + pg.fragment);
         if (!r.ok) {
             pg.is_error = true;
@@ -1159,19 +1569,41 @@ private:
             std::string head = to_lower(r.body.substr(0, 4096));
             charset = find_charset(head);
         }
-        std::string text = to_utf8(r.body, is_single_byte_charset(charset));
+        std::string text;
+        bool single = false;
+        if (!decode_bom(r.body, text)) {  // FIX(2): UTF-8 / UTF-16 byte-order marks
+            single = is_single_byte_charset(charset);
+            text = to_utf8(r.body, single);
+        } else {
+            std::string clean;  // still drop NULs / repair stray bytes
+            clean = to_utf8(text, false);
+            text.swap(clean);
+        }
+        r.body.clear();
+        r.body.shrink_to_fit();  // CHANGED(2): free the raw copy before building the page
         if (is_html) {
+            std::string base;
+            // CHANGED(2): one prepare_html() pass; meta refresh and the visible-text
+            // count use its output (comments and <script> are already removed, so
+            // a commented-out or document.write()-generated <meta refresh> no
+            // longer triggers a redirect).
+            pg.html = prepare_html(text, r.effective_url, token, pg.links, pg.forms, pg.refs, &base, single);
             // FIX: non-HTTP redirects (blank page on DDG result links).
             int delay = 0;
             std::string target;
-            if (parse_meta_refresh(text, delay, target) && delay <= 5) {
-                pg.redirect_to = resolve_url(r.effective_url, clean_href(target));
-            } else if (visible_text_len(text) < 200) {  // only near-empty "redirect pages"
+            if (parse_meta_refresh(pg.html, delay, target) && delay <= 5) {
+                // FIX(2): relative refresh targets resolve against <base href>.
+                pg.redirect_to = resolve_url(base, clean_href(target));
+            } else if (visible_text_len_prepared(pg.html) < 200) {  // only near-empty "redirect pages"
                 std::string js = find_js_redirect(text);
-                if (!js.empty()) pg.redirect_to = resolve_url(r.effective_url, clean_href(js));
+                if (!js.empty()) pg.redirect_to = resolve_url(base, clean_href(js));
             }
-            if (!pg.redirect_to.empty() && !is_http_scheme(pg.redirect_to)) pg.redirect_to.clear();
-            pg.html = prepare_html(text, r.effective_url, token, pg.links, pg.forms, pg.refs);
+            if (!pg.redirect_to.empty()) {
+                // FIX(2): normalise like typed input (control bytes, spaces, NUL,
+                // no host); anything that is not valid http(s) is dropped.
+                std::string err;
+                pg.redirect_to = is_http_scheme(pg.redirect_to) ? normalize_user_url(pg.redirect_to, err) : "";
+            }
         } else {
             // FIX: plain text was parsed as HTML (lost line breaks, '<' swallowed text).
             pg.html = "<html><body><pre>" + html_escape(text) + "</pre></body></html>";
@@ -1185,16 +1617,31 @@ private:
 // Windows, $XDG_CONFIG_HOME/litebird/config (default ~/.config) elsewhere.
 // ---------------------------------------------------------------------------
 
+// CHANGED(2): config I/O is split into "read whole file" / "write whole file
+// atomically", so the settings logic below is platform-neutral and testable.
 #ifdef _WIN32
 std::wstring config_dir() {
     const wchar_t* app = _wgetenv(L"APPDATA");  // wide API: non-ASCII user names work
     return app && *app ? std::wstring(app) + L"\\LiteBird" : std::wstring();
 }
-FILE* open_config(bool write) {
+std::wstring config_path() { std::wstring d = config_dir(); return d.empty() ? d : d + L"\\config.ini"; }
+FILE* open_config_read() {
+    std::wstring p = config_path();
+    return p.empty() ? nullptr : _wfopen(p.c_str(), L"rb");
+}
+bool write_config_atomic(const std::string& data) {
     std::wstring d = config_dir();
-    if (d.empty()) return nullptr;
-    if (write) _wmkdir(d.c_str());
-    return _wfopen((d + L"\\config.ini").c_str(), write ? L"wb" : L"rb");
+    if (d.empty()) return false;
+    _wmkdir(d.c_str());  // %APPDATA% itself always exists
+    std::wstring p = config_path(), tmp = p + L".tmp";
+    FILE* f = _wfopen(tmp.c_str(), L"wb");
+    if (!f) return false;
+    bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size();
+    ok = (std::fclose(f) == 0) && ok;
+    if (!ok) { _wremove(tmp.c_str()); return false; }
+    // _wrename() does not replace an existing file on Windows.
+    _wremove(p.c_str());
+    return _wrename(tmp.c_str(), p.c_str()) == 0;
 }
 #else
 std::string config_dir() {
@@ -1203,38 +1650,106 @@ std::string config_dir() {
     const char* home = std::getenv("HOME");
     return home && *home ? std::string(home) + "/.config/litebird" : std::string();
 }
-FILE* open_config(bool write) {
+FILE* open_config_read() {
     std::string d = config_dir();
-    if (d.empty()) return nullptr;
-    if (write) {
-        // mkdir -p for the two levels we may need (~/.config and ~/.config/litebird)
-        size_t slash = d.rfind('/');
-        if (slash != std::string::npos && slash > 0) mkdir(d.substr(0, slash).c_str(), 0700);
-        mkdir(d.c_str(), 0700);
+    return d.empty() ? nullptr : std::fopen((d + "/config").c_str(), "rb");
+}
+// FIX(2): mkdir -p for any depth. Only two levels were created, so a custom
+// XDG_CONFIG_HOME such as /tmp/a/b/c silently never saved the setting.
+bool mkdir_p(const std::string& dir) {
+    for (size_t p = 1; p <= dir.size(); p++) {
+        if (p != dir.size() && dir[p] != '/') continue;
+        std::string sub = dir.substr(0, p);
+        if (mkdir(sub.c_str(), 0700) != 0 && errno != EEXIST) return false;
     }
-    return std::fopen((d + "/config").c_str(), write ? "wb" : "rb");
+    struct stat st;
+    return stat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+// FIX(2): write to config.tmp and rename() over the old file. fopen("wb")
+// truncated the file first, so a crash / full disk / two LiteBird windows
+// saving at once could leave an empty or half-written config.
+bool write_config_atomic(const std::string& data) {
+    std::string d = config_dir();
+    if (d.empty() || !mkdir_p(d)) return false;
+    std::string p = d + "/config", tmp = p + ".tmp." + std::to_string((long)getpid());
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) return false;
+    bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size();
+    ok = (std::fflush(f) == 0) && ok;
+    ok = (std::fclose(f) == 0) && ok;
+    if (!ok || std::rename(tmp.c_str(), p.c_str()) != 0) { std::remove(tmp.c_str()); return false; }
+    return true;
 }
 #endif
 
-bool load_dark_setting() {
-    FILE* f = open_config(false);
-    if (!f) return false;
-    char line[256];
-    bool dark = false;
-    while (std::fgets(line, sizeof(line), f)) {
-        std::string l = trim(line);
-        if (l == "dark=1" || l == "dark=true") dark = true;
-        else if (l == "dark=0" || l == "dark=false") dark = false;
-    }
+std::string read_config() {
+    FILE* f = open_config_read();
+    if (!f) return "";
+    std::string s;
+    char buf[4096];
+    size_t n;
+    // FIX(2): a corrupt/huge file is capped (64 KB) instead of read forever.
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0 && s.size() < 65536) s.append(buf, n);
     std::fclose(f);
+    return s;
+}
+
+// Parses "dark=..." from config text; the last valid line wins. FIX(2):
+// tolerant of CRLF, a UTF-8 BOM, spaces around '=', "yes/on/no/off", and
+// lines longer than the old 256-byte fgets buffer (which split a long line
+// into pieces that could each be misread as a setting).
+bool parse_dark_setting(const std::string& cfg, bool dflt = false) {
+    bool dark = dflt;
+    size_t i = 0;
+    if (cfg.compare(0, 3, "\xEF\xBB\xBF") == 0) i = 3;
+    while (i < cfg.size()) {
+        size_t e = cfg.find('\n', i);
+        if (e == std::string::npos) e = cfg.size();
+        std::string l = trim(cfg.substr(i, e - i));
+        i = e + 1;
+        size_t eq = l.find('=');
+        if (l.empty() || l[0] == '#' || l[0] == ';' || eq == std::string::npos) continue;
+        if (to_lower(trim(l.substr(0, eq))) != "dark") continue;
+        std::string v = to_lower(trim(l.substr(eq + 1)));
+        if (v == "1" || v == "true" || v == "yes" || v == "on") dark = true;
+        else if (v == "0" || v == "false" || v == "no" || v == "off") dark = false;
+    }
     return dark;
 }
 
+// FIX(2): rewriting the file kept only "dark=", dropping every other line
+// (comments, future settings, settings from a newer LiteBird). Other lines are
+// now preserved and only the dark= line is replaced.
+std::string update_dark_setting(const std::string& cfg, bool dark) {
+    std::string out;
+    bool done = false;
+    size_t i = 0;
+    while (i < cfg.size()) {
+        size_t e = cfg.find('\n', i);
+        if (e == std::string::npos) e = cfg.size();
+        std::string raw = cfg.substr(i, e - i);
+        i = e + 1;
+        if (!raw.empty() && raw.back() == '\r') raw.pop_back();
+        std::string l = trim(raw);
+        size_t eq = l.find('=');
+        if (!l.empty() && l[0] != '#' && eq != std::string::npos && to_lower(trim(l.substr(0, eq))) == "dark") {
+            if (done) continue;  // drop duplicates
+            raw = std::string("dark=") + (dark ? "1" : "0");
+            done = true;
+        }
+        if (raw.find('\0') != std::string::npos) continue;  // corrupt line
+        out += raw + "\n";
+    }
+    if (out.empty()) out = "# LiteBird settings\n";
+    if (!done) out += std::string("dark=") + (dark ? "1" : "0") + "\n";
+    return out;
+}
+
+bool load_dark_setting() { return parse_dark_setting(read_config()); }
+
 void save_dark_setting(bool dark) {
-    FILE* f = open_config(true);
-    if (!f) return;
-    std::fprintf(f, "# LiteBird settings\ndark=%d\n", dark ? 1 : 0);
-    std::fclose(f);
+    if (!write_config_atomic(update_dark_setting(read_config(), dark)))
+        std::cerr << "LiteBird: could not save settings\n";  // FIX(2): failure was silent
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,6 +1781,12 @@ struct HistEntry {
     std::shared_ptr<Page> page;
 };
 const int kCachedPages = 10;
+// CHANGED(2): the ±10-entry cache could hold 21 pages of up to 8 MB each
+// (plus their link/form tables), i.e. ~200-400 MB on a 512 MB v86/i386 box.
+// Pages nearest the current entry are kept until this byte budget is used.
+const size_t kCacheBudgetBytes = 48u * 1024 * 1024;
+const size_t kMaxHistory = 500;      // CHANGED(2): history vector was unbounded
+const size_t kMaxPanelWidgets = 300; // FIX(2): huge forms created thousands of widgets (UI froze)
 
 // A control in the form bar.
 struct PanelItem {
@@ -1349,6 +1870,8 @@ public:
     // FIX: worker threads are cancelled and joined before the window (and
     // later libcurl) goes away; the original had no shutdown path at all.
     ~BrowserUI() override {
+        Fl::remove_timeout(cb_deferred_nav, this);  // FIX(2): no timer may fire into a dead window
+        Fl::remove_timeout(cb_retry_loaded);
         shutdown();
         if (g_ui == this) { g_ui = nullptr; Fl::event_dispatch(nullptr); }
     }
@@ -1369,10 +1892,17 @@ public:
     // CHANGED: navigation is asynchronous. The original fetched on the UI
     // thread, freezing the window for up to 25 s (no redraw, no close).
     // FEATURE: `post` carries an urlencoded form body (POST submission).
-    void navigate(const std::string& raw, NavMode mode = NavMode::Push, const std::string* post = nullptr) {
+    // FIX(2): `post_type` is the Content-Type of `post` ("" = urlencoded).
+    void navigate(const std::string& raw, NavMode mode = NavMode::Push, const std::string* post = nullptr,
+                  const std::string& post_type = "") {
         std::string err;
         std::string url = normalize_user_url(raw, err);
         if (url.empty()) {  // FIX: invalid input is reported instead of fetched
+            // FIX(2): cancel any load still in flight; it used to finish later and
+            // replace this error page (and push a history entry) behind the user's back.
+            ++gen_;
+            reap_jobs(true);
+            cursor(FL_CURSOR_DEFAULT);
             auto pg = std::make_shared<Page>();
             pg->html = error_page(err, trim(raw));
             pg->is_error = true;
@@ -1381,13 +1911,13 @@ public:
             copy_label("Error - LiteBird");
             return;
         }
-        std::string unwrapped = unwrap_redirector(url);  // FIX: DDG /l/?uddg= result links
+        std::string unwrapped = unwrap_all(url);  // FIX: DDG /l/?uddg= result links (FIX(2): normalised, nested)
         if (!unwrapped.empty()) url = unwrapped;
         unsigned long gen = ++gen_;
         reap_jobs(/*cancel_all=*/true);  // FIX: a newer navigation cancels the older one
 
         set_status("Loading " + url + " ...");
-        url_->value(url.c_str());
+        set_url_text(url);
         cursor(FL_CURSOR_WAIT);
 
         Job job;
@@ -1400,21 +1930,55 @@ public:
         bool has_post = post != nullptr;
         std::string body = post ? *post : std::string();
         BrowserUI* self = this;
-        job.thread = std::thread([self, url, gen, mode, cancel, done, token, insecure, has_post, body]() {
-            // Worker thread: no FLTK calls here except Fl::awake().
-            auto* res = new NavResult{self, gen, mode, std::make_shared<Page>()};
-            try {
-                *res->page = BrowserEngine::load(url, has_post ? &body : nullptr, cancel.get(), insecure, token);
-            } catch (const std::exception& e) {  // FIX: an exception in a std::thread calls std::terminate
-                res->page->is_error = true;
-                res->page->url = url;
-                res->page->html = error_page(std::string("Internal error: ") + e.what(), url);
-            }
-            // FIX: hand the result to the UI thread safely; free it if it was
-            // superseded or if FLTK's awake queue is full (Fl::awake returns -1).
-            if (cancel->load() || Fl::awake(&BrowserUI::on_loaded, res) != 0) delete res;
-            done->store(true);
-        });
+        try {
+            job.thread = std::thread([self, url, gen, mode, cancel, done, token, insecure, has_post, body, post_type]() {
+                // Worker thread: no FLTK calls here except Fl::awake().
+                // FIX(2): allocation moved inside the try and catch(...) added: a
+                // bad_alloc from `new NavResult`/make_shared, or a non-std exception,
+                // escaped the thread and called std::terminate.
+                NavResult* res = nullptr;
+                try {
+                    res = new NavResult{self, gen, mode, std::make_shared<Page>()};
+                    *res->page = BrowserEngine::load(url, has_post ? &body : nullptr, cancel.get(), insecure, token,
+                                                     post_type);
+                } catch (const std::exception& e) {  // FIX: an exception in a std::thread calls std::terminate
+                    if (res) {
+                        *res->page = Page();
+                        res->page->is_error = true;
+                        res->page->url = url;
+                        res->page->html = error_page(std::string("Internal error: ") + e.what(), url);
+                    }
+                } catch (...) {
+                    if (res) {
+                        *res->page = Page();
+                        res->page->is_error = true;
+                        res->page->url = url;
+                        res->page->html = error_page("Internal error", url);
+                    }
+                }
+                // FIX: hand the result to the UI thread safely; free it if it was
+                // superseded or if FLTK's awake queue is full (Fl::awake returns -1).
+                // FIX(2): when the queue is full the UI used to stay in "Loading..."
+                // with a wait cursor forever; retry for up to ~2 s before giving up.
+                if (res) {
+                    bool posted = false;
+                    for (int k = 0; k < 40 && !cancel->load(); k++) {
+                        if (Fl::awake(&BrowserUI::on_loaded, res) == 0) { posted = true; break; }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    }
+                    if (!posted) delete res;
+                }
+                done->store(true);
+            });
+        } catch (const std::system_error& e) {  // FIX(2): thread creation can fail (EAGAIN)
+            auto pg = std::make_shared<Page>();
+            pg->is_error = true;
+            pg->url = url;
+            pg->html = error_page(std::string("Could not start the page load: ") + e.what(), url);
+            cursor(FL_CURSOR_DEFAULT);
+            show_page(pg, mode);
+            return;
+        }
         std::lock_guard<std::mutex> lk(jobs_mu_);
         jobs_.push_back(std::move(job));
     }
@@ -1438,6 +2002,13 @@ private:
     std::vector<Fl_Widget*> ref_widget_; // flat control index -> widget (nullptr for hidden)
     std::string pending_link_;
     int pending_form_ = -1, pending_submitter_ = -1;
+    // FIX(2): the page the pending form indices refer to. A load finishing
+    // between the click and the deferred submit replaced cur_, and the indices
+    // were then applied to the *new* page's forms (wrong form submitted / OOB).
+    std::weak_ptr<Page> pending_page_;
+    // FIX(2): Fl_Menu_Item labels for Fl_Choice::copy(). Two generations are
+    // kept because old widgets are deleted lazily (Fl::delete_widget).
+    std::vector<std::unique_ptr<std::vector<std::string>>> menu_labels_, old_menu_labels_;
     unsigned long gen_ = 0;              // only results for the latest navigation are shown
     bool in_set_value_ = false;          // true while we hand a document to view_
     std::mutex jobs_mu_;
@@ -1463,6 +2034,12 @@ private:
 
     void set_status(const std::string& s) { status_->copy_label(escape_label(s).c_str()); }
 
+    // FIX(2): remembers what *we* put in the address bar, so build_panel() can
+    // tell "the user is typing a new address" from "focus just sits there".
+    std::string url_shown_;
+    void set_url_text(const std::string& u) { url_->value(u.c_str()); url_shown_ = u; }
+    bool user_typing_url() const { return Fl::focus() == url_ && url_shown_ != url_->value(); }
+
     void update_nav_buttons() {  // CHANGED: grey out Back/Fwd when unusable
         if (hist_idx_ > 0) back_->activate(); else back_->deactivate();
         if (hist_idx_ + 1 < (int)hist_.size()) fwd_->activate(); else fwd_->deactivate();
@@ -1484,9 +2061,20 @@ private:
         std::unique_ptr<NavResult> r(static_cast<NavResult*>(p));
         BrowserUI* self = r->ui;
         if (r->gen != self->gen_) return;  // FIX: stale result from a superseded navigation
+        // FIX(2): awake callbacks also run inside the nested event loop of an
+        // open Fl_Choice / menu popup. Showing the page there deleted the
+        // Fl_Choice (and the menu array the popup was drawing) while its popup
+        // was open: the dropdown vanished under the mouse and the choice was lost
+        // (FLTK 1.3.11's widget tracker happened to prevent a crash; relying on it
+        // is a latent use-after-free). While a popup holds the grab, retry later.
+        if (Fl::grab()) {
+            Fl::add_timeout(0.05, cb_retry_loaded, r.release());
+            return;
+        }
         self->show_page(r->page, r->mode);
         self->reap_jobs(false);
     }
+    static void cb_retry_loaded(void* p) { on_loaded(p); }
 
     void show_page(const std::shared_ptr<Page>& pg, NavMode mode) {
         show_document(pg);
@@ -1508,10 +2096,18 @@ private:
         } else if (hist_idx_ >= 0 && hist_idx_ < (int)hist_.size()) {
             hist_[hist_idx_] = {pg->url, pg};  // keep the post-redirect URL
         }
-        for (int k = 0; k < (int)hist_.size(); k++)  // bounded page cache
-            if (std::abs(k - hist_idx_) > kCachedPages) hist_[k].page.reset();
+        // FIX(2): cap the history length (drop the oldest entries).
+        if (hist_.size() > kMaxHistory) {
+            size_t drop = hist_.size() - kMaxHistory;
+            if ((int)drop > hist_idx_) drop = (size_t)std::max(0, hist_idx_);
+            hist_.erase(hist_.begin(), hist_.begin() + drop);
+            hist_idx_ -= (int)drop;
+        }
+        trim_cache();
         // FIX: the URL bar now shows the final URL after redirects.
-        url_->value(pg->url.c_str());
+        // FIX(2): a finished load overwrote whatever the user was typing in the
+        // address bar; the final URL is only shown when the bar is not being edited.
+        if (!user_typing_url()) set_url_text(pg->url);
         set_status(pg->is_error ? "Error: " + pg->url : pg->url);
         const char* t = view_->title();  // CHANGED: page <title> in the window title
         // Fl_Help_View reports "Untitled" when the page has no <title>; show the URL then.
@@ -1519,6 +2115,24 @@ private:
         std::string title = name + " - LiteBird";
         copy_label(title.c_str());
         update_nav_buttons();
+    }
+
+    // CHANGED(2): bounded page cache by distance (±kCachedPages) *and* bytes.
+    // Entries are visited nearest-first so the pages you are most likely to go
+    // Back/Forward to survive; the current page is never dropped.
+    void trim_cache() {
+        size_t used = 0;
+        for (int d = 0; d < (int)hist_.size(); d++) {
+            for (int s : {-1, 1}) {
+                int k = hist_idx_ + s * d;
+                if (k < 0 || k >= (int)hist_.size() || (d == 0 && s == 1)) continue;
+                auto& pg = hist_[k].page;
+                if (!pg) continue;
+                size_t b = pg->bytes();
+                if (k != hist_idx_ && (d > kCachedPages || used + b > kCacheBudgetBytes)) pg.reset();
+                else used += b;
+            }
+        }
     }
 
     // CHANGED: Back/Fwd show the cached page when there is one.
@@ -1574,29 +2188,80 @@ private:
 
     // ---------------- form bar ----------------
 
-    static std::string menu_escape(const std::string& s) {
+    // CHANGED(2): Fl_Menu_Item text is drawn as a label, so only '@' (symbol)
+    // and '&' (shortcut underline) need escaping now that add() is not used.
+    static std::string menu_label(const std::string& s) {
         std::string o;
-        for (char c : s) {
-            if (c == '/' || c == '\\' || c == '&' || c == '_') o += '\\';  // Fl_Menu_::add() specials
-            if (c == '@') o += '@';
+        for (char c : utf8_truncate(s, 80)) {
+            if (c == '@' || c == '&') o += c;
             o += c;
         }
         return o.empty() ? std::string(" ") : o;
     }
 
-    void build_panel() {
-        panel_->clear();  // Fl_Scroll::clear() keeps its scrollbars
+    // FIX(2) (wrong value submitted): Fl_Menu_::add() merges items with the same
+    // label ("--", "Other", two "Any" options in different groups...), so the
+    // Fl_Choice had fewer items than the <select> and value() indexed the wrong
+    // option. Building the item array and copy()ing it keeps one item per option.
+    Fl_Choice* make_choice(const FormField& f, int& sel, int& widest) {
+        auto* ch = new Fl_Choice(0, 0, 10, kRowH);
+        menu_labels_.emplace_back(new std::vector<std::string>());
+        auto& labels = *menu_labels_.back();
+        size_t n = std::min<size_t>(f.options.size(), 2000);  // FIX(2): bound giant <select>s
+        labels.reserve(n);
+        std::vector<Fl_Menu_Item> items(n + 1);
+        std::memset(static_cast<void*>(items.data()), 0, sizeof(Fl_Menu_Item) * items.size());
+        sel = 0;
+        for (size_t k = 0; k < n; k++) {
+            labels.push_back(menu_label(f.options[k].label));
+            if (f.options[k].selected) sel = (int)k;
+            widest = std::max(widest, (int)fl_width(labels.back().c_str()) + 30);
+        }
+        for (size_t k = 0; k < n; k++) items[k].text = labels[k].c_str();  // after reserve: stable
+        ch->copy(items.data());  // copies the items; labels stay owned by menu_labels_
+        if (n) ch->value(sel);
+        return ch;
+    }
+
+    // FIX(2) (hardening, latent use-after-free): panel_->clear() deleted the
+    // controls synchronously, but build_panel() runs from inside control
+    // callbacks (Enter in a field whose form action is invalid -> error page ->
+    // rebuild), i.e. the widget whose handle() is still on the stack was freed.
+    // FLTK 1.3.11 happens to return straight after the callback (ASan stayed
+    // quiet), but that is not guaranteed by the API. Old controls are now
+    // detached and handed to Fl::delete_widget(), FLTK's sanctioned way to
+    // delete a widget from its own callback.
+    void clear_panel() {
+        for (auto& it : items_) {
+            if (!it.w) continue;
+            panel_->remove(it.w);
+            it.w->hide();
+            Fl::delete_widget(it.w);
+        }
         items_.clear();
+        old_menu_labels_ = std::move(menu_labels_);
+        menu_labels_.clear();
+    }
+
+    void build_panel() {
+        // FIX(2): remember whether the user is typing in the address bar
+        // (focused *and* edited since we last set it).
+        bool url_focused = user_typing_url();
+        clear_panel();
         ref_widget_.assign(cur_ ? cur_->refs.size() : 0, nullptr);
         if (!cur_ || cur_->refs.empty()) { layout_all(); return; }
 
         panel_->begin();
         fl_font(FL_HELVETICA, 12);
         int last_form = -1;
+        Fl_Widget* autofocus = nullptr;
         for (size_t idx = 0; idx < cur_->refs.size(); idx++) {
             const FieldRef& rf = cur_->refs[idx];
             const FormField& f = cur_->forms[rf.form].fields[rf.field];
             if (f.type == "hidden") continue;
+            // FIX(2): huge forms (thousands of checkboxes) froze the UI; controls
+            // past the cap keep their default values for submission.
+            if (items_.size() >= kMaxPanelWidgets) break;
             PanelItem it;
             it.newline = rf.form != last_form;
             last_form = rf.form;
@@ -1617,14 +2282,8 @@ private:
                 it.w = in;
                 it.ww = 320;
             } else if (f.type == "select") {
-                auto* ch = new Fl_Choice(0, 0, 10, kRowH);
                 int sel = 0, widest = 60;
-                for (size_t k = 0; k < f.options.size(); k++) {
-                    ch->add(menu_escape(f.options[k].label).c_str());
-                    if (f.options[k].selected) sel = (int)k;
-                    widest = std::max(widest, (int)fl_width(f.options[k].label.c_str()) + 30);
-                }
-                if (!f.options.empty()) ch->value(sel);
+                Fl_Choice* ch = make_choice(f, sel, widest);  // FIX(2): see make_choice()
                 ch->textsize(12);
                 it.w = ch;
                 it.ww = std::min(260, widest);
@@ -1638,7 +2297,7 @@ private:
                 it.ww = (int)fl_width(cap.c_str()) + 30;
                 cap.clear();  // label drawn inside the widget
             } else if (f.type == "submit") {
-                std::string l = escape_label(f.label.empty() ? f.value : f.label);
+                std::string l = escape_label(utf8_truncate(f.label.empty() ? f.value : f.label, 40));
                 auto* b = new Fl_Button(0, 0, 10, kRowH);
                 b->copy_label(l.c_str());
                 b->callback(cb_submit_btn, this);
@@ -1654,6 +2313,7 @@ private:
                 it.lw = (int)fl_width(cap.c_str()) + 8;
             }
             if (f.disabled) it.w->deactivate();
+            if (f.autofocus && !autofocus && !f.disabled) autofocus = it.w;
             ref_widget_[idx] = it.w;
             items_.push_back(it);
         }
@@ -1661,6 +2321,11 @@ private:
         Fl_Group::current(nullptr);
         layout_all();
         // Focus the first text field so the user can type right away (DDG Lite).
+        // FIX(2): not while the user is typing a new address (keystrokes used to
+        // jump into the page's search box mid-word when a load finished), and an
+        // explicit autofocus control wins over "first text field".
+        if (url_focused) return;
+        if (autofocus) { autofocus->take_focus(); return; }
         for (auto& it : items_)
             if (dynamic_cast<Fl_Input*>(it.w) && it.w->active()) { it.w->take_focus(); break; }
     }
@@ -1682,11 +2347,15 @@ private:
             }
             int content_h = y + kRowH + kPad;
             panel_h = std::min(content_h, kMaxPanelRows * (kRowH + kGap) + kPad);
+            // FIX(2): every window resize/move reset the form bar to the top;
+            // keep the user's scroll position (clamped to the new content).
+            int keep = std::min(panel_->yposition(), std::max(0, content_h - panel_h));
             panel_->resize(0, 44, W, panel_h);
             panel_->scroll_to(0, 0);
             for (auto& it : items_)
                 it.w->resize(panel_->x() + it.rx, panel_->y() + it.ry,
                              std::max(40, std::min(it.ww, maxx - it.rx)), kRowH);
+            if (keep > 0) panel_->scroll_to(0, keep);
             panel_->show();
         } else {
             panel_->hide();
@@ -1714,6 +2383,13 @@ private:
                     submitter = (int)k;
                     break;
                 }
+        // FIX(2): HTML: implicit submission does nothing when the default button
+        // is disabled.
+        if (submitter >= 0 && submitter < (int)keep->refs.size() &&
+            form.fields[keep->refs[submitter].field].disabled) {
+            set_status("The form's submit button is disabled.");
+            return;
+        }
         std::vector<std::pair<std::string, std::string>> kv;
         for (size_t k = 0; k < keep->refs.size(); k++) {
             if (keep->refs[k].form != form_idx) continue;
@@ -1721,24 +2397,63 @@ private:
             if (f.name.empty() || f.disabled) continue;
             Fl_Widget* w = k < ref_widget_.size() ? ref_widget_[k] : nullptr;
             if (f.type == "hidden") kv.push_back({f.name, f.value});
-            else if (f.type == "text" || f.type == "password" || f.type == "textarea") {
+            else if (f.type == "text" || f.type == "password") {
                 auto* in = dynamic_cast<Fl_Input_*>(w);
                 kv.push_back({f.name, in ? std::string(in->value()) : f.value});
+            } else if (f.type == "textarea") {
+                auto* in = dynamic_cast<Fl_Input_*>(w);
+                kv.push_back({f.name, to_crlf(in ? std::string(in->value()) : f.value)});  // FIX(2): CRLF
             } else if (f.type == "select") {
                 auto* ch = dynamic_cast<Fl_Choice*>(w);
                 int v = ch ? ch->value() : -1;
+                // FIX(2): a <select> without a widget (past the widget cap) was not
+                // submitted at all; it now sends its default option.
+                if (!ch)
+                    for (size_t o = 0; o < f.options.size(); o++)
+                        if (f.options[o].selected) { v = (int)o; break; }
                 if (v >= 0 && v < (int)f.options.size()) kv.push_back({f.name, f.options[v].value});
             } else if (f.type == "checkbox" || f.type == "radio") {
                 auto* b = dynamic_cast<Fl_Button*>(w);
                 if (b ? b->value() != 0 : f.checked) kv.push_back({f.name, f.value});
             } else if (f.type == "submit") {
-                if ((int)k == submitter) kv.push_back({f.name, f.value});
+                if ((int)k == submitter && !f.image) kv.push_back({f.name, f.value});
+            }
+            // FIX(2): <input type=image> submits click coordinates "name.x/name.y"
+            // (not name=value); servers that check for "go.x" ignored the submit.
+            if (f.type == "submit" && f.image && (int)k == submitter) {
+                std::string pre = f.name.empty() ? "" : f.name + ".";
+                kv.push_back({pre + "x", "0"});
+                kv.push_back({pre + "y", "0"});
             }
         }
+        // FIX(2): an image submit without a name still submits x/y (the loop
+        // above skips unnamed fields).
+        if (submitter >= 0 && submitter < (int)keep->refs.size() && keep->refs[submitter].form == form_idx) {
+            const FormField& sf = form.fields[keep->refs[submitter].field];
+            if (sf.image && sf.name.empty() && !sf.disabled) { kv.push_back({"x", "0"}); kv.push_back({"y", "0"}); }
+        }
         if (!is_http_scheme(form.action)) { set_status("Unsupported form action: " + form.action); return; }
-        std::string body = form_urlencode(kv);
-        if (form.method == "post") navigate(form.action, NavMode::Push, &body);
-        else navigate(form_get_url(form.action, body), NavMode::Push);
+        // FIX(2): submit in the page's (or accept-charset's) encoding.
+        if (form.single_byte)
+            for (auto& p : kv) { p.first = utf8_to_cp1252(p.first); p.second = utf8_to_cp1252(p.second); }
+        if (form.method == "post") {
+            // FIX(2): honour enctype (multipart/form-data, text/plain).
+            if (form.enctype == "multipart") {
+                std::random_device rd;
+                char b[48];
+                std::snprintf(b, sizeof(b), "----LiteBird%08x%08x", (unsigned)rd(), (unsigned)rd());
+                std::string body = form_multipart(kv, b);
+                navigate(form.action, NavMode::Push, &body, std::string("multipart/form-data; boundary=") + b);
+            } else if (form.enctype == "text") {
+                std::string body = form_text_plain(kv);
+                navigate(form.action, NavMode::Push, &body, "text/plain");
+            } else {
+                std::string body = form_urlencode(kv);
+                navigate(form.action, NavMode::Push, &body);
+            }
+        } else {
+            navigate(form_get_url(form.action, form_urlencode(kv)), NavMode::Push);
+        }
     }
 
     static void cb_field_enter(Fl_Widget* w, void* v) {
@@ -1806,7 +2521,10 @@ private:
         if (self->pending_form_ >= 0) {
             int f = self->pending_form_, s = self->pending_submitter_;
             self->pending_form_ = self->pending_submitter_ = -1;
-            self->submit_form(f, s);
+            // FIX(2): only submit if the page the click was on is still shown.
+            std::shared_ptr<Page> pg = self->pending_page_.lock();
+            self->pending_page_.reset();
+            if (pg && pg == self->cur_) self->submit_form(f, s);
             return;
         }
         std::string u;
@@ -1850,6 +2568,7 @@ private:
             if (kind == 's') {
                 self->pending_form_ = self->cur_->refs[idx].form;
                 self->pending_submitter_ = (int)idx;
+                self->pending_page_ = self->cur_;  // FIX(2)
                 Fl::add_timeout(0.0, cb_deferred_nav, self);
             } else if (idx < self->ref_widget_.size() && self->ref_widget_[idx]) {
                 Fl_Widget* fw = self->ref_widget_[idx];
