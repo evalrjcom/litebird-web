@@ -19,6 +19,16 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send(f'<html><head><meta name="referrer" content="origin"><meta name="robots" content="noindex, nofollow"><meta http-equiv="refresh" content="0; url={t}"></head><body><script language="JavaScript">function ffredirect(){{window.location.replace(\'{t}\');}}setTimeout(\'ffredirect()\',100);</script></body></html>')
         elif u.path == "/jsonly":
             self.send(f"<html><body><script>window.location.href = '{BASE}/target.html?via=js';</script></body></html>")
+        elif u.path == "/twoforms":
+            self.send('<html><head><title>twoforms</title></head><body>'
+                      '<form action="/echo"><input name="a" value="one"></form>'
+                      '<form action="/echo"><input name="b" value="two"></form></body></html>')
+        elif u.path == "/w3like":
+            self.send('<html><head><title>w3like</title></head><body><div class="tnb"><label for="s">Search field</label>'
+                      '<input id="s" type="text" placeholder="Search..."><button aria-label="Close">&times;</button>'
+                      '<label><input type="checkbox" id="darkToggle"> Dark mode</label></div>'
+                      '<nav class="dropdown-nav navex"><input placeholder="Filter..."><button>&times;</button></nav>'
+                      '<img src="/logo.png" alt="Logo"><svg><title>icon</title></svg><h1>Python Tutorial</h1></body></html>')
         elif u.path == "/dupsel":
             self.send('<html><head><title>dupsel</title></head><body><form action="/echo" method="get"><input name="q" value="x">'
                       '<select name="k"><option value="a">A</option><option value="1">--</option><option value="2">--</option>'

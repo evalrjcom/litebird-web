@@ -38,6 +38,13 @@ xdotool key ctrl+l; xdotool key ctrl+a; xdotool type --delay 5 "$B/slow"; xdotoo
 sleep 0.3; xdotool mousemove 60 88 click 1; sleep 4; echo "during popup (load done): $(title) $(alive)"
 import -window root -crop 920x500+0+0 $SHOTS/$TAG-choice-popup.png 2>/dev/null
 xdotool key Escape; sleep 1.5; echo "after popup closed: $(title) $(alive)"
+# 6b. two forms: clicking the second form's placeholder switches the form bar to it
+mark two; go $B/twoforms; xdotool mousemove 120 117 click 1; sleep 0.5; xdotool key End; xdotool type X; xdotool key Return; sleep 1.5
+echo "twoforms: $(title) | $(since | grep -o 'GET /echo[^ ]*' | head -1)"
+# 6c. w3schools-like page: no form bar for JS-only controls (a click where the bar was submits nothing)
+go $B/w3like; import -window root -crop 920x300+0+0 $SHOTS/$TAG-w3like.png 2>/dev/null
+mark w3; xdotool mousemove 150 88 click 1; xdotool type zz; xdotool key Return; sleep 1.5
+echo "w3like: form submissions after click+typing+Enter: $(since | grep -c "GET /w3like?") (bar empty)"
 # 7. meta-refresh loop
 go $B/loop1 3; echo "loop: $(title)"
 # 8. huge JS literal on a near-empty page (std::regex stack overflow)
