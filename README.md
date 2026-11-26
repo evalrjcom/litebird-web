@@ -35,7 +35,11 @@ This is **not** a full modern browser. It is intentionally minimal so it can boo
   buttons (including `type=image`), sent by GET or POST as `application/x-www-form-urlencoded`,
   `multipart/form-data` or `text/plain` (the form's `enctype`), in the page's encoding
   (UTF-8 or Windows-1252, or the form's `accept-charset`). `<label for>` / wrapping `<label>`
-  text is used as the caption and `autofocus` is honoured. Fl_Help_View cannot host
+  text is used as the caption and `autofocus` is honoured. Controls outside a `<form>` (JS-only
+  search/filter boxes, menu buttons, theme toggles) and hidden content (`hidden`, `aria-hidden`,
+  `display:none`, hide classes, dropdown `<nav>` menus) are skipped. The form bar shows one form at
+  a time (click another form's placeholder to switch) and collapses when there is none. Images
+  are shown as their alt text. Fl_Help_View cannot host
   widgets, so each form control appears in the page as a clickable placeholder (`[q: ____]`,
   `[ Search ]`) and as a real FLTK widget in the **form bar** under the address bar. Press Enter
   in a text field to submit. DuckDuckGo Lite (https://lite.duckduckgo.com/lite/) works end to end.

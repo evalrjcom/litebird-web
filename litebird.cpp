@@ -697,6 +697,10 @@ struct FormField {
     bool checked = false, disabled = false;
     bool image = false;      // FIX(2): <input type=image> submits name.x / name.y
     bool autofocus = false;  // FIX(2): honour autofocus instead of always focusing field #1
+    // FIX(3): false for controls that are not rendered (type=hidden, `hidden`,
+    // aria-hidden, display:none, inside a hidden/menu subtree, or in a form
+    // that is not shown). They are still submitted with their default value.
+    bool visible = true;
     int size = 0;
 };
 
@@ -708,8 +712,15 @@ struct Form {
     // server could not parse. Values: "urlencoded", "multipart", "text".
     std::string enctype = "urlencoded";
     bool single_byte = false;     // FIX(2): page/accept-charset is Windows-1252 / Latin-1
+    std::string id;               // FIX(3): for <input form="id"> association
+    bool visible = false;         // FIX(3): has a visible text field / select / submit button
     std::vector<FormField> fields;
 };
+
+// FIX(3): text-like controls that make a form worth showing in the form bar.
+bool is_text_like(const FormField& f) {
+    return f.type == "text" || f.type == "password" || f.type == "textarea" || f.type == "select";
+}
 
 // FIX(2): HTML spec "normalize newlines" for textarea values (CRLF on the wire).
 std::string to_crlf(const std::string& s) {
@@ -854,6 +865,118 @@ std::map<std::string, std::string> collect_labels(const std::string& html) {
     return m;
 }
 
+// FIX(3): elements whose content a browser would not show. LiteBird has no CSS
+// and no JS, so pages such as w3schools.com used to show every hidden menu,
+// overlay and JS-only widget inline. Detected from markup only:
+//  * the `hidden` attribute, aria-hidden="true", <template>, closed <dialog>;
+//  * inline style display:none / visibility:hidden;
+//  * common "hidden" utility classes (exact class tokens, e.g. "w3-hide",
+//    "d-none", "hidden", "sr-only"; "w3-hide-small" is *not* hidden);
+//  * <nav> overlays: <nav> whose class marks it as a dropdown / mobile /
+//    modal / off-canvas menu (opened by JS, invisible on a desktop browser);
+//  * icon-font ligature spans (material-icons): the text is an icon name.
+bool style_hides(const std::string& style) {
+    std::string s;
+    for (char c : to_lower(style)) if (!std::isspace((unsigned char)c)) s += c;
+    return s.find("display:none") != std::string::npos || s.find("visibility:hidden") != std::string::npos;
+}
+
+bool class_hides(const std::string& cls, const std::string& name) {
+    static const char* kHide[] = {"hidden", "hide", "w3-hide", "d-none", "is-hidden", "invisible",
+                                  "sr-only", "visually-hidden", "screen-reader-text", "hidden-xs-up",
+                                  "material-icons", "material-icons-outlined", "material-symbols-outlined",
+                                  "material-symbols-rounded"};
+    std::string c = to_lower(cls);
+    size_t i = 0;
+    while (i < c.size()) {
+        while (i < c.size() && std::isspace((unsigned char)c[i])) i++;
+        size_t e = i;
+        while (e < c.size() && !std::isspace((unsigned char)c[e])) e++;
+        std::string tok = c.substr(i, e - i);
+        i = e;
+        if (tok.empty()) continue;
+        for (const char* h : kHide) if (tok == h) return true;
+        if (name == "nav")
+            for (const char* k : {"dropdown", "mobile", "modal", "offcanvas", "overlay", "popup", "drawer", "flyout"})
+                if (tok.find(k) != std::string::npos) return true;
+    }
+    return false;
+}
+
+bool tag_hides(const std::string& tag, const std::string& name) {
+    if (name == "template") return true;
+    if (name == "dialog" && !find_attr(tag, "open").found) return true;
+    if (find_attr(tag, "hidden").found) return true;
+    if (to_lower(trim(attr(tag, "aria-hidden"))) == "true") return true;
+    if (style_hides(attr(tag, "style"))) return true;
+    return class_hides(attr(tag, "class"), name);
+}
+
+bool is_void_element(const std::string& n) {
+    static const char* kVoid[] = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+                                  "meta", "param", "source", "track", "wbr"};
+    for (const char* v : kVoid) if (n == v) return true;
+    return false;
+}
+
+// Index just past the end tag matching the start tag `name` whose content
+// starts at p (same-name nesting counted, comments/scripts skipped), or npos.
+size_t find_matching_close(const std::string& h, size_t p, const std::string& name) {
+    int depth = 1;
+    std::string open = "<" + name, close = "</" + name;
+    for (size_t j = h.find('<', p); j != std::string::npos; j = h.find('<', j + 1)) {
+        if (h.compare(j, 4, "<!--") == 0) {
+            size_t ce = h.find("-->", j + 4);
+            if (ce == std::string::npos) return std::string::npos;
+            j = ce + 2;
+            continue;
+        }
+        if (ieq_prefix(h, j, "<script") || ieq_prefix(h, j, "<style")) {
+            size_t ce = find_close_tag(h, j + 1, ieq_prefix(h, j, "<script") ? "</script" : "</style");
+            if (ce == std::string::npos) return std::string::npos;
+            j = ce + 1;
+            continue;
+        }
+        bool is_close = ieq_prefix(h, j, close.c_str());
+        bool is_open = !is_close && ieq_prefix(h, j, open.c_str());
+        if (!is_close && !is_open) continue;
+        size_t n = is_close ? close.size() : open.size();
+        if (j + n < h.size() && (std::isalnum((unsigned char)h[j + n]) || h[j + n] == '-')) continue;  // <navx>
+        size_t gt = find_tag_end(h, j);
+        if (gt == std::string::npos) return std::string::npos;
+        if (is_open && h[gt - 1] != '/') depth++;
+        else if (is_close && --depth == 0) return gt + 1;
+        j = gt;
+    }
+    return std::string::npos;
+}
+
+// FIX(3): appends page text, dropping Private Use Area characters (U+E000..
+// U+F8FF). Icon fonts (Font Awesome, w3schools' fontello) put their glyphs
+// there; without the font, Fl_Help_View drew them as boxes in the header.
+void append_text(std::string& out, const std::string& h, size_t b, size_t e) {
+    for (size_t k = b; k < e; k++) {
+        unsigned char c = (unsigned char)h[k];
+        if (c == 0xEE || (c == 0xEF && k + 1 < e && (unsigned char)h[k + 1] <= 0xA3)) {
+            if (k + 2 < e && ((unsigned char)h[k + 1] & 0xC0) == 0x80 && ((unsigned char)h[k + 2] & 0xC0) == 0x80) {
+                k += 2;
+                continue;
+            }
+        }
+        if (c == '&' && k + 3 < e && h[k + 1] == '#') {  // &#xE802; / &#59394;
+            size_t semi = h.find(';', k);
+            if (semi != std::string::npos && semi < e && semi - k <= 9) {
+                std::string num = h.substr(k + 2, semi - k - 2);
+                bool hex = !num.empty() && (num[0] == 'x' || num[0] == 'X');
+                char* endp = nullptr;
+                unsigned long v = std::strtoul(num.c_str() + (hex ? 1 : 0), &endp, hex ? 16 : 10);
+                if (endp && *endp == '\0' && v >= 0xE000 && v <= 0xF8FF) { k = semi; continue; }
+            }
+        }
+        out += (char)c;
+    }
+}
+
 // CHANGED(2): optional outputs `base_out` (final <base href>, needed to resolve
 // a relative meta refresh) and `single_byte` (page encoding, for form submission).
 std::string prepare_html(const std::string& html, const std::string& doc_url,
@@ -863,26 +986,32 @@ std::string prepare_html(const std::string& html, const std::string& doc_url,
     std::string out;
     out.reserve(html.size() + 1024);
     std::string base = doc_url;
-    int cur_form = -1, orphan_form = -1;
+    int cur_form = -1;
     const std::map<std::string, std::string> labels = collect_labels(html);
     size_t label_open = std::string::npos;  // FIX(2): <label>Text <input></label> captions
-    auto form_for_control = [&]() -> int {
-        if (cur_form >= 0) return cur_form;
-        // Controls outside any <form>: collect them in one implicit GET form.
-        if (orphan_form < 0) {
-            Form f;
-            f.action = strip_fragment(doc_url, nullptr);
-            f.single_byte = single_byte;
-            forms.push_back(f);
-            orphan_form = (int)forms.size() - 1;
-        }
-        return orphan_form;
-    };
-    auto add_field = [&](const FormField& f) {
-        int fi = form_for_control();
-        forms[fi].fields.push_back(f);
-        refs.push_back({fi, (int)forms[fi].fields.size() - 1});
-        if (f.type != "hidden") out += field_placeholder(f, token, refs.size() - 1);
+    // FIX(3): hidden subtree [.., hidden_end): no output, controls invisible.
+    size_t hidden_end = 0;
+    int hidden_failures = 0;  // unclosed hidden elements: stop trying after a few (cost bound)
+    // FIX(3) (w3schools: "multiple bars with textboxes"): controls outside any
+    // <form> used to be collected into an implicit GET form, so every JS-only
+    // search box, menu filter, close button and theme toggle got a widget and a
+    // placeholder. Without JavaScript such controls cannot do anything, so they
+    // are dropped unless form="id" names a real form. Controls are collected
+    // first and their placeholders spliced into the output at the end, once it
+    // is known which ones (and which forms) are actually shown.
+    struct PendingCtl { FormField f; int form; std::string form_attr; size_t out_pos; std::string id; int label; };
+    std::vector<PendingCtl> pending;
+    // FIX(3): <label> spans in `out`, removed at the end when the control they
+    // label is not rendered (w3schools' "Search field" / "Dark mode" captions).
+    struct LabelSpan { size_t start, end; std::string for_id; };
+    std::vector<LabelSpan> label_spans;
+    int open_label = -1;
+    auto add_field = [&](FormField f, const std::string& tag, size_t tag_pos) {
+        bool hid = tag_pos < hidden_end || f.type == "hidden" || find_attr(tag, "hidden").found ||
+                   to_lower(trim(attr(tag, "aria-hidden"))) == "true" || style_hides(attr(tag, "style")) ||
+                   class_hides(attr(tag, "class"), "");
+        f.visible = !hid;
+        pending.push_back({std::move(f), cur_form, trim(attr(tag, "form")), out.size(), trim(attr(tag, "id")), open_label});
     };
     auto label_of = [&](const std::string& tag, size_t tag_pos) {
         std::string l;
@@ -899,15 +1028,16 @@ std::string prepare_html(const std::string& html, const std::string& doc_url,
     size_t i = 0;
     while (i < html.size()) {
         size_t lt = html.find('<', i);
-        if (lt == std::string::npos) { out.append(html, i, std::string::npos); break; }
-        out.append(html, i, lt - i);
+        bool text_hidden = i < hidden_end;
+        if (lt == std::string::npos) { if (!text_hidden) append_text(out, html, i, html.size()); break; }
+        if (!text_hidden) append_text(out, html, i, lt);  // FIX(3): icon-font glyphs dropped
         if (html.compare(lt, 4, "<!--") == 0) {
             size_t ce = html.find("-->", lt + 4);
             i = (ce == std::string::npos) ? html.size() : ce + 3;
             continue;  // comments are dropped (they may contain fake tags)
         }
         size_t gt = find_tag_end(html, lt);
-        if (gt == std::string::npos) { out.append(html, lt, std::string::npos); break; }
+        if (gt == std::string::npos) { if (!text_hidden) out.append(html, lt, std::string::npos); break; }
         std::string tag = html.substr(lt, gt - lt + 1);
         std::string name = tag_name(tag);
         i = gt + 1;
@@ -916,12 +1046,36 @@ std::string prepare_html(const std::string& html, const std::string& doc_url,
             i = after_close_tag(html, find_close_tag(html, i, name == "script" ? "</script" : "</style"));
             continue;
         }
+        // FIX(3): inline <svg> icons/logos: Fl_Help_View printed their <title>
+        // and <text> content in the header. Dropped entirely.
+        if (name == "svg" || name == "math") {
+            size_t e = find_matching_close(html, i, name);
+            if (e != std::string::npos && tag[tag.size() - 2] != '/') i = e;
+            continue;
+        }
+        // FIX(3): start of a hidden subtree (see tag_hides()).
+        if (lt >= hidden_end && !name.empty() && name[0] != '/' && !is_void_element(name) &&
+            tag[tag.size() - 2] != '/' && hidden_failures < 16 && tag_hides(tag, name)) {
+            size_t e = find_matching_close(html, i, name);
+            if (e != std::string::npos) hidden_end = e;
+            else hidden_failures++;  // unclosed: show it rather than hide the rest of the page
+        }
+        bool tag_hidden = lt < hidden_end;
+        // FIX(3): <img> is replaced by its alt text. Images are never loaded,
+        // and FLTK drew a broken-image icon (red X) for every one of them.
+        if (name == "img") {
+            std::string alt = trim(attr(tag, "alt"));
+            if (!tag_hidden && !alt.empty() && find_attr(tag, "hidden").found == false)
+                out += "[" + html_escape(utf8_truncate(alt, 40)) + "]";
+            continue;
+        }
+        if (name == "picture" || name == "/picture" || name == "source") continue;
         if (name == "base") {
             std::string h = attr(tag, "href");
             if (!h.empty()) base = resolve_url(doc_url, clean_href(h));
         } else if (name == "a") {
             AttrSpan a = find_attr(tag, "href");
-            if (a.found && a.end > a.start) {
+            if (a.found && a.end > a.start && !tag_hidden) {  // FIX(3): no link table entries for hidden menus
                 std::string href = clean_href(a.value);
                 if (!href.empty() && href[0] != '#') {  // same-page anchors are left to FLTK
                     links.push_back(resolve_url(base, href));
@@ -931,14 +1085,21 @@ std::string prepare_html(const std::string& html, const std::string& doc_url,
             }
         } else if (name == "label") {
             label_open = i;  // FIX(2): implicit label association
+            if (!tag_hidden) {
+                label_spans.push_back({out.size(), std::string::npos, trim(attr(tag, "for"))});
+                open_label = (int)label_spans.size() - 1;
+            }
         } else if (name == "/label") {
             label_open = std::string::npos;
+            if (open_label >= 0 && !tag_hidden) label_spans[open_label].end = out.size() + tag.size();
+            open_label = -1;
         } else if (name == "form") {
             // FIX(2): a nested <form> start tag is ignored by HTML parsers (its
             // controls belong to the outer form). It used to start a new form, so
             // those controls were submitted to the inner action / method instead.
             if (cur_form >= 0) continue;
             Form f;
+            f.id = trim(attr(tag, "id"));  // FIX(3)
             std::string act = clean_href(attr(tag, "action"));
             f.action = act.empty() ? strip_fragment(doc_url, nullptr) : resolve_url(base, act);
             f.method = to_lower(trim(attr(tag, "method"))) == "post" ? "post" : "get";
@@ -991,7 +1152,7 @@ std::string prepare_html(const std::string& html, const std::string& doc_url,
                 if (f.type != "hidden") f.value.erase(std::remove_if(f.value.begin(), f.value.end(),
                                                       [](char c) { return c == '\r' || c == '\n'; }), f.value.end());
             }
-            add_field(f);
+            add_field(std::move(f), tag, lt);
             continue;
         } else if (name == "textarea") {
             FormField f;
@@ -1009,7 +1170,7 @@ std::string prepare_html(const std::string& html, const std::string& doc_url,
             // submission converts back to CRLF (to_crlf).
             f.value.erase(std::remove(f.value.begin(), f.value.end(), '\r'), f.value.end());
             i = after_close_tag(html, ce);
-            add_field(f);
+            add_field(std::move(f), tag, lt);
             continue;
         } else if (name == "select") {
             FormField f;
@@ -1053,7 +1214,7 @@ std::string prepare_html(const std::string& html, const std::string& doc_url,
             for (auto& o : f.options) if (o.selected) { if (any) o.selected = false; any = true; }
             if (!any && !f.options.empty()) f.options[0].selected = true;
             i = real_close ? after_close_tag(html, ce) : end;  // FIX(2): re-parse the implicit closer
-            add_field(f);
+            add_field(std::move(f), tag, lt);
             continue;
         } else if (name == "button") {
             // FIX(2): an unclosed <button> swallowed the rest of the page as its label.
@@ -1074,13 +1235,67 @@ std::string prepare_html(const std::string& html, const std::string& doc_url,
             if (f.label.empty()) f.label = f.value.empty() ? "Submit" : f.value;
             f.autofocus = find_attr(tag, "autofocus").found;
             f.disabled = find_attr(tag, "disabled").found;  // FIX(2): disabled buttons were clickable
-            add_field(f);
+            add_field(std::move(f), tag, lt);
             continue;
         }
-        out += tag;
+        if (!tag_hidden) out += tag;
     }
+    // FIX(3): resolve form owners, decide which forms are shown, then splice in
+    // the placeholders of visible controls of visible forms only.
+    for (auto& pc : pending) {
+        if (!pc.form_attr.empty()) {  // form="id" overrides the ancestor <form>
+            pc.form = -1;
+            for (size_t k = 0; k < forms.size(); k++)
+                if (forms[k].id == pc.form_attr) { pc.form = (int)k; break; }
+        }
+    }
+    for (auto& pc : pending)
+        if (pc.form >= 0 && pc.f.visible && (is_text_like(pc.f) || pc.f.type == "submit"))
+            forms[pc.form].visible = true;
+    for (auto& pc : pending)
+        if (pc.form < 0 || !forms[pc.form].visible) pc.f.visible = false;
+    // Labels whose control is not rendered are removed with their text.
+    std::vector<std::pair<size_t, size_t>> cut;  // [start, end) ranges of `out`
+    {
+        std::map<std::string, bool> id_rendered;
+        std::vector<int> label_ctls(label_spans.size(), 0), label_shown(label_spans.size(), 0);
+        for (auto& pc : pending) {
+            if (!pc.id.empty()) id_rendered[pc.id] = id_rendered[pc.id] || pc.f.visible;
+            if (pc.label >= 0) { label_ctls[pc.label]++; label_shown[pc.label] += pc.f.visible; }
+        }
+        for (size_t k = 0; k < label_spans.size(); k++) {
+            const LabelSpan& ls = label_spans[k];
+            if (ls.end == std::string::npos) continue;
+            auto it = ls.for_id.empty() ? id_rendered.end() : id_rendered.find(ls.for_id);
+            bool drop = (it != id_rendered.end() && !it->second) ||
+                        (ls.for_id.empty() && label_ctls[k] > 0 && label_shown[k] == 0);
+            if (drop && (cut.empty() || ls.start >= cut.back().second)) cut.push_back({ls.start, ls.end});
+        }
+    }
+    std::string final_out;
+    final_out.reserve(out.size() + pending.size() * 64);
+    size_t copied = 0, ci = 0;
+    auto copy_to = [&](size_t pos) {  // copy out[copied, pos) minus cut ranges
+        while (copied < pos) {
+            while (ci < cut.size() && cut[ci].second <= copied) ci++;
+            if (ci < cut.size() && cut[ci].first <= copied) { copied = std::min(pos, cut[ci].second); continue; }
+            size_t stop = ci < cut.size() ? std::min(pos, cut[ci].first) : pos;
+            final_out.append(out, copied, stop - copied);
+            copied = stop;
+        }
+    };
+    for (auto& pc : pending) {
+        if (pc.form < 0) continue;  // no form owner: inert, dropped
+        Form& fm = forms[pc.form];
+        fm.fields.push_back(pc.f);
+        refs.push_back({pc.form, (int)fm.fields.size() - 1});
+        if (!pc.f.visible) continue;
+        copy_to(pc.out_pos);
+        final_out += field_placeholder(pc.f, token, refs.size() - 1);
+    }
+    copy_to(out.size());
     if (base_out) *base_out = base;
-    return out;
+    return final_out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1487,6 +1702,9 @@ struct Page {
     std::string redirect_to;       // FEATURE: meta-refresh / JS redirect target, if any
     bool from_post = false;        // result of a form POST (always a new history entry)
     bool is_error = false;
+    // FIX(3): the one form shown in the form bar (-2 = not chosen yet, -1 = none).
+    // UI thread only. Clicking a placeholder of another form switches to it.
+    int active_form = -2;
     // CHANGED(2): approximate heap size, for the page-cache byte budget.
     size_t bytes() const {
         size_t n = html.size() + url.size() + redirect_to.size() + sizeof(Page);
@@ -2006,6 +2224,7 @@ private:
     // between the click and the deferred submit replaced cur_, and the indices
     // were then applied to the *new* page's forms (wrong form submitted / OOB).
     std::weak_ptr<Page> pending_page_;
+    std::shared_ptr<Page> panel_page_;   // FIX(3): page the form bar widgets belong to
     // FIX(2): Fl_Menu_Item labels for Fl_Choice::copy(). Two generations are
     // kept because old widgets are deleted lazily (Fl::delete_widget).
     std::vector<std::unique_ptr<std::vector<std::string>>> menu_labels_, old_menu_labels_;
@@ -2025,7 +2244,22 @@ private:
     }
 
     // Puts a page on screen (theme applied) and rebuilds the form bar.
+    // FIX(3): the form the bar starts with: one with an autofocus control, else
+    // the first shown form with a visible text field or select, else none (the
+    // bar stays collapsed; submit-only forms still work from their placeholders).
+    static int default_form(const Page& pg) {
+        int first = -1;
+        for (const FieldRef& rf : pg.refs) {
+            const FormField& f = pg.forms[rf.form].fields[rf.field];
+            if (!f.visible || !pg.forms[rf.form].visible) continue;
+            if (f.autofocus && !f.disabled) return rf.form;
+            if (first < 0 && is_text_like(f)) first = rf.form;
+        }
+        return first;
+    }
+
     void show_document(const std::shared_ptr<Page>& pg) {
+        if (pg->active_form == -2) pg->active_form = default_form(*pg);
         cur_ = pg;
         set_document(dark_ ? apply_dark_theme(pg->html) : pg->html);
         if (!pg->fragment.empty()) view_->topline(pg->fragment.c_str());  // FIX: #fragment was ignored
@@ -2231,7 +2465,31 @@ private:
     // quiet), but that is not guaranteed by the API. Old controls are now
     // detached and handed to Fl::delete_widget(), FLTK's sanctioned way to
     // delete a widget from its own callback.
+    // FIX(3): copies what the user typed/selected back into the page's form
+    // data, so switching the bar to another form (or going Back to a cached
+    // page) keeps the edits, and placeholder submits use them.
+    void save_panel_values() {
+        if (!panel_page_) return;
+        Page& pg = *panel_page_;
+        for (size_t k = 0; k < ref_widget_.size() && k < pg.refs.size(); k++) {
+            Fl_Widget* w = ref_widget_[k];
+            if (!w) continue;
+            FormField& f = pg.forms[pg.refs[k].form].fields[pg.refs[k].field];
+            if (f.type == "text" || f.type == "password" || f.type == "textarea") {
+                if (auto* in = dynamic_cast<Fl_Input_*>(w)) f.value = in->value();
+            } else if (f.type == "checkbox" || f.type == "radio") {
+                if (auto* b = dynamic_cast<Fl_Button*>(w)) f.checked = b->value() != 0;
+            } else if (f.type == "select") {
+                auto* ch = dynamic_cast<Fl_Choice*>(w);
+                int v = ch ? ch->value() : -1;
+                if (v >= 0 && v < (int)f.options.size())
+                    for (size_t o = 0; o < f.options.size(); o++) f.options[o].selected = (int)o == v;
+            }
+        }
+    }
+
     void clear_panel() {
+        save_panel_values();  // FIX(3)
         for (auto& it : items_) {
             if (!it.w) continue;
             panel_->remove(it.w);
@@ -2248,8 +2506,10 @@ private:
         // (focused *and* edited since we last set it).
         bool url_focused = user_typing_url();
         clear_panel();
+        panel_page_ = cur_;
         ref_widget_.assign(cur_ ? cur_->refs.size() : 0, nullptr);
-        if (!cur_ || cur_->refs.empty()) { layout_all(); return; }
+        // FIX(3): collapse the bar when the page has no form worth showing.
+        if (!cur_ || cur_->refs.empty() || cur_->active_form < 0) { layout_all(); return; }
 
         panel_->begin();
         fl_font(FL_HELVETICA, 12);
@@ -2259,6 +2519,8 @@ private:
             const FieldRef& rf = cur_->refs[idx];
             const FormField& f = cur_->forms[rf.form].fields[rf.field];
             if (f.type == "hidden") continue;
+            // FIX(3): only the active form, and only controls that are shown.
+            if (rf.form != cur_->active_form || !f.visible) continue;
             // FIX(2): huge forms (thousands of checkboxes) froze the UI; controls
             // past the cap keep their default values for submission.
             if (items_.size() >= kMaxPanelWidgets) break;
@@ -2570,8 +2832,15 @@ private:
                 self->pending_submitter_ = (int)idx;
                 self->pending_page_ = self->cur_;  // FIX(2)
                 Fl::add_timeout(0.0, cb_deferred_nav, self);
-            } else if (idx < self->ref_widget_.size() && self->ref_widget_[idx]) {
-                Fl_Widget* fw = self->ref_widget_[idx];
+            } else {
+                // FIX(3): a placeholder of another form switches the bar to it.
+                int fi = self->cur_->refs[idx].form;
+                if (fi != self->cur_->active_form) {
+                    self->cur_->active_form = fi;
+                    self->build_panel();
+                }
+                Fl_Widget* fw = idx < self->ref_widget_.size() ? self->ref_widget_[idx] : nullptr;
+                if (!fw) return nullptr;
                 for (auto& it : self->items_)
                     if (it.w == fw) self->panel_->scroll_to(0, std::max(0, it.ry - kPad));
                 fw->take_focus();

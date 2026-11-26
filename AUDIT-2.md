@@ -142,6 +142,39 @@ Every change in `litebird.cpp` is marked `// FIX(2):` (a bug, security issue or 
 6. **Theme follows the system.** Detect the system theme (GTK `gtk-application-prefer-dark-theme`, or the Windows `AppsUseLightTheme` registry key), with per-site light or dark exceptions stored in the now-preserving config file.
 7. **Session restore.** Reopen the last tab's history after a crash or restart, written with the new atomic config writer.
 
+## Follow-up: JS-only controls flooded the form bar (FIX(3))
+
+**Report:** on https://www.w3schools.com/python/ the PR build filled the form bar with 3 rows of widgets (search box, filter boxes, × buttons, "Back to topics", w3schools' own dark-mode checkbox) and the page with `[Filter...: ____] [ × ]` placeholders and broken-image icons.
+
+**Root cause:** that page has **no `<form>` at all**. `prepare_html()` put every control outside a form into one implicit GET form: 17 JS-only controls (8 inputs, 9 buttons), most of them inside dropdown menus that CSS hides. In addition, all 34 `<img>` tags were drawn as broken images.
+
+**Fix (`// FIX(3):` in `litebird.cpp`):**
+- **No implicit form.** Controls without a form owner are dropped, unless `form="id"` names a real form. Without JS they can't submit anything.
+- **Hidden content is skipped** (`tag_hides()`): text, links and controls are all dropped for:
+  - the `hidden` attribute, `aria-hidden="true"`, `<template>` and closed `<dialog>`
+  - inline `display:none` or `visibility:hidden`
+  - exact hide-utility classes (`w3-hide`, `d-none`, `hidden`, `sr-only`, …; `w3-hide-small` stays visible)
+  - `<nav>` dropdown, mobile, modal or off-canvas overlays
+
+  Hidden controls inside real forms are still submitted with their default values. An unclosed hidden element doesn't hide the rest of the page.
+- **Only forms that can be submitted are shown:** a form must have a visible text field, select or submit button.
+- **The form bar shows one form at a time:** the `autofocus` form, else the first form with a text field. Clicking a placeholder of another form switches the bar to that form, and edits are kept in the page's form data. If the page has no such form, the bar collapses.
+- **Placeholders** are spliced in only for rendered controls. `<label>` text of dropped controls is removed too.
+- **Images:** `<img>` becomes `[alt text]` (at most 40 characters), or nothing when alt is empty, so there are no red-X icons. `<svg>`/`<math>` are dropped, and so are icon-font Private Use Area glyphs (U+E000–U+F8FF, as UTF-8 or `&#x…;`).
+
+**Result on the real w3schools Python page (saved copy, 325 KB):**
+
+| | Before | After |
+|---|---|---|
+| Implicit forms | 1 | 0 |
+| Controls | 17 | 0 |
+| Placeholders | 17 | 0 |
+| `<img>` | 34 | 0 |
+| Prepared HTML | 213 KB | 91 KB |
+| Form bar | 3 rows | none |
+
+The tutorial content and the sidebar links are unchanged.
+
 ## Files
 - `litebird.cpp`: corrected source, with FIX(2) / CHANGED(2) markers
 - `tests/test_helpers.cpp`: extended unit tests (`make test`)

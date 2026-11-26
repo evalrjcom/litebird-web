@@ -111,7 +111,8 @@ int main() {
                           "<input type=checkbox name=c checked><input type=radio name=r value=1><button name=go value=yes>Go <b>now</b></button></form>"
                           "<input name=orphan>";
         std::string o = prepare_html(ddg, "https://lite.duckduckgo.com/lite/", "TK", l, f, r);
-        if (f.size() != 2) { std::cerr << "FAIL form count " << f.size() << "\n"; fails++; }
+        // FIX(3): the control outside any <form> is dropped (no implicit form).
+        if (f.size() != 1) { std::cerr << "FAIL form count " << f.size() << "\n"; fails++; }
         else {
             expect(f[0].action, "https://lite.duckduckgo.com/lite/", "form action");
             expect(f[0].method, "post", "form method");
@@ -125,7 +126,7 @@ int main() {
                 expect(std::string(f[0].fields[5].checked ? "on" : "off") + f[0].fields[5].value, "onon", "checkbox");
                 expect(f[0].fields[7].label + "|" + f[0].fields[7].value, "Go now|yes", "button");
             }
-            expect(f[1].action, "https://lite.duckduckgo.com/lite/", "orphan form");
+            expect(f[0].visible ? "shown" : "not shown", "shown", "ddg form shown");
         }
         if (o.find("TK:f0") == std::string::npos || o.find("TK:s1") == std::string::npos ||
             o.find("[ Search ]") == std::string::npos || o.find("<form") != std::string::npos ||
@@ -178,11 +179,9 @@ int main() {
         std::vector<std::string> l; std::vector<Form> f; std::vector<FieldRef> r;
         prepare_html("<form action=/a><input name=q><form action=/inner><input name=in1></form><input name=after>",
                      "https://h.com/x", "TK", l, f, r);
-        expect(std::to_string(f.size()), "2", "nested form ignored");
-        if (f.size() == 2) {
+        expect(std::to_string(f.size()), "1", "nested form ignored");
+        if (f.size() == 1)  // "after" is outside the form after the first </form>: dropped (FIX(3))
             expect(f[0].action + ":" + std::to_string(f[0].fields.size()), "https://h.com/a:2", "inner controls in outer form");
-            expect(f[1].fields[0].name, "after", "after </form> is outside");
-        }
     }
     // forms: unclosed select, labels, image, autofocus, enctype, charset
     {
@@ -193,12 +192,12 @@ int main() {
             "<select name=s><option>One<option>Two"
             "<input type=image name=go alt=Go>"
             "<label>Wrapped <input name=w></label>"
+            "<button>unclosed"
             "</form>"
-            "<p>visible text after</p>"
-            "<button>unclosed";
+            "<p>visible text after</p>";
         std::string o = prepare_html(h, "https://h.com/x", "TK", l, f, r);
-        expect(std::to_string(f.size()), "2", "form + orphan");
-        if (f.size() == 2 && f[0].fields.size() == 4) {
+        expect(std::to_string(f.size()), "1", "one form");
+        if (f.size() == 1 && f[0].fields.size() == 5) {
             expect(f[0].action + "|" + f[0].method + "|" + f[0].enctype + (f[0].single_byte ? "|1252" : "|utf8"),
                    "https://h.com/a|post|multipart|1252", "form attrs");
             expect(f[0].fields[0].label, "Query", "label for");
@@ -206,20 +205,20 @@ int main() {
             expect(std::to_string(f[0].fields[1].options.size()), "2", "unclosed select bounded");
             expect(f[0].fields[2].image ? f[0].fields[2].label : "no", "Go", "image submit");
             expect(f[0].fields[3].label, "Wrapped", "implicit label");
-            expect(f[1].fields[0].type + ":" + f[1].fields[0].label, "submit:unclosed", "unclosed button");
+            expect(f[0].fields[4].type + ":" + f[0].fields[4].label, "submit:unclosed", "unclosed button");
         } else { std::cerr << "FAIL form field count " << (f.empty() ? 0 : f[0].fields.size()) << "\n"; fails++; }
         if (o.find("visible text after") == std::string::npos) { std::cerr << "FAIL page text swallowed: " << o << "\n"; fails++; }
     }
     {   // select options with duplicate labels keep one entry each
         std::vector<std::string> l; std::vector<Form> f; std::vector<FieldRef> r;
-        prepare_html("<select name=k><option value=1>--<option value=2>--<option value=3 selected>A&amp;B</select>",
+        prepare_html("<form><select name=k><option value=1>--<option value=2>--<option value=3 selected>A&amp;B</select></form>",
                      "https://h.com/", "TK", l, f, r);
         expect(std::to_string(f[0].fields[0].options.size()), "3", "dup options parsed");
         expect(f[0].fields[0].options[2].label, "A&B", "option entity");
     }
     {   // textarea CRLF handling, text newline stripping
         std::vector<std::string> l; std::vector<Form> f; std::vector<FieldRef> r;
-        prepare_html("<textarea name=t>\r\nl1\r\nl2</textarea><input name=v value=\"a&#10;b\">", "https://h.com/", "TK", l, f, r);
+        prepare_html("<form><textarea name=t>\r\nl1\r\nl2</textarea><input name=v value=\"a&#10;b\"></form>", "https://h.com/", "TK", l, f, r);
         expect(f[0].fields[0].value, "l1\nl2", "textarea LF");
         expect(to_crlf(f[0].fields[0].value), "l1\r\nl2", "textarea CRLF on submit");
         expect(f[0].fields[1].value, "ab", "text newline stripped");
@@ -229,7 +228,7 @@ int main() {
            "--BND\r\nContent-Disposition: form-data; name=\"c\"\r\n\r\nx\r\ny\r\n--BND--\r\n", "multipart");
     expect(form_text_plain({{"a", "1"}, {"b", "2"}}), "a=1\r\nb=2\r\n", "text/plain");
     {   // huge page with many unclosed selects: linear time, content kept
-        std::string h;
+        std::string h = "<form>";
         for (int k = 0; k < 20000; k++) h += "<select name=s" + std::to_string(k) + "><option>x";
         h += "<p>END</p>";
         std::vector<std::string> l; std::vector<Form> f; std::vector<FieldRef> r;
@@ -304,6 +303,74 @@ int main() {
         }
     }
 #endif
+
+    // ================= FIX(3): JS-only controls, hidden content, images =================
+    {   // w3schools-like page: no <form>, JS search/filter boxes, close buttons,
+        // dark-mode checkbox, hidden dropdown <nav> menus, svg icons, images.
+        std::string h =
+            "<body><div class=\"tnb\"><input id=\"tnb-google-search-input\" type=\"text\" placeholder=\"Search...\" aria-label=\"Search field\">"
+            "<button class=\"tnb-x\" aria-label=\"Close\">&times;</button>"
+            "<a href=\"/\"><svg viewBox=\"0 0 10 10\"><title>Home icon</title><path d=\"M0\"/></svg>HOME</a>"
+            "<i class=\"fa\">\xEE\xA0\x82</i><span>&#xE802;</span>"
+            "<label><input type=\"checkbox\" id=\"darkToggle\"> Dark mode</label></div>"
+            "<nav id=\"nav_tutorials\" class=\"dropdown-nav w3-hide-small navex\"><input placeholder=\"Filter...\">"
+            "<button>&times;</button><a href=\"/html/\">HIDDEN MENU LINK</a></nav>"
+            "<nav id=\"tnb-mobile-nav\" class=\"tnb-mobile-nav w3-hide\"><a href=\"/m\">MOBILE MENU</a></nav>"
+            "<div class=\"w3-hide-small\">SHOWN ON DESKTOP</div>"
+            "<div hidden>HIDDEN ATTR</div><div aria-hidden=\"true\">ARIA HIDDEN</div>"
+            "<div style=\"color:red; display: none\">STYLE HIDDEN<div>nested</div></div>"
+            "<template><p>TEMPLATE</p></template>"
+            "<img src=\"/logo.png\" alt=\"W3Schools logo\"><img src=\"/deco.png\" alt=\"\">"
+            "<h1>Python Tutorial</h1><button type=\"button\" onclick=\"go()\">Try it</button></body>";
+        std::vector<std::string> l; std::vector<Form> f; std::vector<FieldRef> r;
+        std::string o = prepare_html(h, "https://www.w3schools.com/python/", "TK", l, f, r);
+        expect(std::to_string(f.size()) + "/" + std::to_string(r.size()), "0/0", "w3: no implicit form");
+        for (const char* junk : {"TK:f", "TK:s", "[Search", "Filter", "HIDDEN", "MOBILE MENU", "ARIA",
+                                 "STYLE HIDDEN", "nested", "TEMPLATE", "Home icon", "<img", "<svg", "\xEE\xA0\x82", "&#xE802;",
+                                 "[ ]", "[x]", "Dark mode"})
+            if (o.find(junk) != std::string::npos) { std::cerr << "FAIL w3 junk [" << junk << "] in: " << o << "\n"; fails++; }
+        for (const char* keep : {"HOME", "SHOWN ON DESKTOP", "[W3Schools logo]", "Python Tutorial"})
+            if (o.find(keep) == std::string::npos) { std::cerr << "FAIL w3 lost [" << keep << "] in: " << o << "\n"; fails++; }
+    }
+    {   // form="id" association, hidden controls submitted but not shown, form visibility
+        std::string h =
+            "<form id=s action=/search><input name=q placeholder=Query><input type=hidden name=t value=1>"
+            "<input name=css value=x style=\"display:none\"><div hidden><input name=h2 value=y></div></form>"
+            "<input name=extra form=s value=e><input name=lost form=nope>"
+            "<form action=/token><input type=hidden name=csrf value=z></form>"
+            "<form action=/next method=post><input type=hidden name=p value=2><input type=submit value=Next></form>";
+        std::vector<std::string> l; std::vector<Form> f; std::vector<FieldRef> r;
+        std::string o = prepare_html(h, "https://h.com/", "TK", l, f, r);
+        expect(std::to_string(f.size()), "3", "three forms");
+        if (f.size() == 3) {
+            std::string names, vis;
+            for (auto& fd : f[0].fields) { names += fd.name + ","; vis += fd.visible ? "1" : "0"; }
+            expect(names + vis, "q,t,css,h2,extra,10001", "form= owner + hidden controls kept");
+            expect(std::string(f[0].visible ? "1" : "0") + (f[1].visible ? "1" : "0") + (f[2].visible ? "1" : "0"),
+                   "101", "form visibility (hidden-only form not shown, submit-only shown)");
+        }
+        if (o.find("[ Next ]") == std::string::npos || o.find("Query") == std::string::npos ||
+            o.find(": x]") != std::string::npos || o.find(": y]") != std::string::npos) {
+            std::cerr << "FAIL hidden placeholders: " << o << "\n"; fails++;
+        }
+    }
+    {   // an unclosed hidden element must not hide the rest of the page
+        std::vector<std::string> l; std::vector<Form> f; std::vector<FieldRef> r;
+        std::string o = prepare_html("<div hidden>secret<p>after</p>", "https://h.com/", "TK", l, f, r);
+        if (o.find("after") == std::string::npos) { std::cerr << "FAIL unclosed hidden: " << o << "\n"; fails++; }
+        o = prepare_html("<div hidden><div>a</div><div>b</div></div>VISIBLE", "https://h.com/", "TK", l, f, r);
+        if (o.find("VISIBLE") == std::string::npos || o.find(">a<") != std::string::npos) { std::cerr << "FAIL nested hidden: " << o << "\n"; fails++; }
+    }
+    {   // labels of rendered controls and plain labels stay; labels of dropped controls go
+        std::vector<std::string> l; std::vector<Form> f; std::vector<FieldRef> r;
+        std::string o = prepare_html("<form><label for=q>NameLbl</label><input id=q name=q></form>"
+                                     "<label for=x>GoneLbl</label><input id=x><label>PlainLbl</label>",
+                                     "https://h.com/", "TK", l, f, r);
+        if (o.find("NameLbl") == std::string::npos || o.find("PlainLbl") == std::string::npos ||
+            o.find("GoneLbl") != std::string::npos || o.find("TK:f0") == std::string::npos) {
+            std::cerr << "FAIL labels: " << o << "\n"; fails++;
+        }
+    }
     std::cout << (fails ? "FAILED: " : "All tests passed: ") << fails << " failures\n";
     return fails ? 1 : 0;
 }
