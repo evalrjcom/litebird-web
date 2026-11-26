@@ -407,6 +407,57 @@ int main() {
         expect(std::to_string(scroll_key_target(FL_End, 0, P, 0, 300, 500, 16, 40)), "0", "End on a short page");
         expect(std::to_string(scroll_key_target(FL_Page_Down, 0, P, 0, 5000, 30, 16, 40)), "40", "tiny view pages by a line");
     }
+    {   // FEAT(5): built-in home page
+        Page hp = make_home_page("TK", kDefaultDdgLite, kDefaultWiby);
+        expect(hp.url, "about:home", "home url");
+        expect(std::to_string(hp.forms.size()), "2", "home: two forms");
+        if (hp.forms.size() == 2) {
+            const char* acts[] = {"https://lite.duckduckgo.com/lite/", "https://wiby.me/"};
+            for (int k = 0; k < 2; k++) {
+                const Form& f = hp.forms[k];
+                std::string sig;
+                for (auto& fd : f.fields) sig += fd.type + ":" + fd.name + (fd.visible ? "" : "(hidden)") + ",";
+                expect(f.action, acts[k], "home form action");
+                expect(f.method, "get", "home form method");
+                expect(std::string(f.visible ? "1" : "0"), "1", "home form submittable/visible");
+                expect(sig, "text:q,submit:,", "home form fields");
+                if (!f.fields.empty()) expect(std::string(f.fields[0].autofocus ? "1" : "0"), "0", "home: no autofocus (no focus steal)");
+            }
+            expect(hp.forms[1].fields.empty() ? "" : hp.forms[1].fields[0].label, "wiby", "wiby field caption");
+        }
+        expect(std::to_string(hp.refs.size()), "4", "home: 4 inline controls");
+        expect(std::to_string(Page(hp).active_form), "-2", "home: bar form chosen at display time");
+        if (hp.links.size() < 30) { std::cerr << "FAIL home links: " << hp.links.size() << "\n"; fails++; }
+        bool credit = false, all_http = true;
+        for (auto& l : hp.links) { credit |= l == "https://greycoder.com/a-list-of-text-only-new-sites/"; all_http &= is_http_scheme(l); }
+        expect(std::string(credit ? "1" : "0") + (all_http ? "1" : "0"), "11", "home: greycoder credit + http(s) links only");
+        if (hp.html.find("TK:f0") == std::string::npos || hp.html.find("TK:s3") == std::string::npos)
+            { std::cerr << "FAIL home placeholders\n"; fails++; }
+        if (hp.html.find("color") != std::string::npos || hp.html.find("style") != std::string::npos)
+            { std::cerr << "FAIL home page hardcodes colours/styles\n"; fails++; }
+        Page mk = make_home_page("TK", "http://127.0.0.1:1/lite/?a=1&b=2", "http://127.0.0.1:1/wiby/");
+        expect(mk.forms.size() == 2 ? mk.forms[0].action + " " + mk.forms[1].action : "", "http://127.0.0.1:1/lite/?a=1&b=2 http://127.0.0.1:1/wiby/", "home actions overridable");
+        expect(std::to_string(is_home_url(" About:Home ")) + std::to_string(is_home_url("litebird:home")) +
+               std::to_string(is_home_url("about:blank")) + std::to_string(is_home_url("https://about:home")), "1100", "is_home_url");
+        std::string e2;
+        expect(normalize_user_url("about:home", e2), "", "about:home is not a fetchable URL (handled before normalisation)");
+        const std::string D = kDefaultDdgLite;
+        expect(address_bar_search_url("hello world", D), "https://lite.duckduckgo.com/lite/?q=hello+world", "bar search: words");
+        expect(address_bar_search_url("python", D), "https://lite.duckduckgo.com/lite/?q=python", "bar search: one word");
+        expect(address_bar_search_url("c++ & you", D), "https://lite.duckduckgo.com/lite/?q=c%2B%2B+%26+you", "bar search: encoding");
+        expect(address_bar_search_url("example.com", D), "", "bar search: host");
+        expect(address_bar_search_url("localhost", D), "", "bar search: localhost");
+        expect(address_bar_search_url("localhost:8080", D), "", "bar search: host:port");
+        expect(address_bar_search_url("https://a.com/x y", D), "", "bar search: URL with space");
+        expect(address_bar_search_url("about:home", D), "", "bar search: about:home");
+        expect(address_bar_search_url("   ", D), "", "bar search: empty");
+        expect(address_bar_search_url("what is a.b", D), "https://lite.duckduckgo.com/lite/?q=what+is+a.b", "bar search: words with dot");
+        expect(parse_home_setting("dark=1\nhome = https://a.com/\n"), "https://a.com/", "home= setting");
+        expect(parse_home_setting("\xEF\xBB\xBF# x\r\nHOME=about:home\r\n"), "about:home", "home= setting BOM/CRLF/case");
+        expect(parse_home_setting("dark=1\n;home=x\n"), "", "home= unset / commented");
+        expect(update_dark_setting("home=https://a.com/\ndark=0\n", true).find("home=https://a.com/") != std::string::npos ? "kept" : "lost",
+               "kept", "saving dark mode keeps home=");
+    }
     std::cout << (fails ? "FAILED: " : "All tests passed: ") << fails << " failures\n";
     return fails ? 1 : 0;
 }

@@ -1831,6 +1831,176 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// FEAT(5): built-in home page (about:home, also litebird:home)
+// ---------------------------------------------------------------------------
+// Embedded in the binary so it works offline and needs no files. It has two
+// real <form>s (DuckDuckGo Lite and wiby.me, both GET with field "q") that
+// go through the normal form bar / inline placeholders, plus the text-only
+// and minimalist sites from greycoder's list. No colours or CSS: dark mode is
+// applied by apply_dark_theme() like on any other page.
+const char kHomeUrl[] = "about:home";
+const char kDefaultDdgLite[] = "https://lite.duckduckgo.com/lite/";
+const char kDefaultWiby[] = "https://wiby.me/";
+
+bool is_home_url(const std::string& raw) {
+    std::string s = to_lower(trim(raw));
+    return s == "about:home" || s == "litebird:home" || s == "about:home/" || s == "litebird:home/";
+}
+
+// Source: https://greycoder.com/a-list-of-text-only-new-sites/ (fetched
+// 2026-11-26). Dropped: UK Daily Mail Text-Based (now redirects to the
+// regular Daily Mail site) and News Minimalist (JavaScript bot checkpoint,
+// unusable without JS). Teahose is linked over https (http returned 500).
+const char kHomeHtmlTemplate[] = R"HOMEPAGE(<html><head><title>LiteBird Home</title></head><body>
+<h1>LiteBird</h1>
+<p>Click a search field below, or the field in the bar above, type, and press Enter.
+Typing words in the address bar also searches DuckDuckGo Lite.</p>
+
+<h2>Search</h2>
+<form action="@DDG@" method="get">
+<p><b>DuckDuckGo Lite</b> - private web search, lightweight results<br>
+<input type="text" name="q" size="40" aria-label="DuckDuckGo">
+<input type="submit" value="Search DuckDuckGo"></p>
+</form>
+<form action="@WIBY@" method="get">
+<p><b>wiby.me</b> - search engine for the classic, lightweight web<br>
+<input type="text" name="q" size="40" aria-label="wiby">
+<input type="submit" value="Search wiby"></p>
+</form>
+
+<h2>Text-only and minimalist sites</h2>
+<p>From greycoder's list
+<a href="https://greycoder.com/a-list-of-text-only-new-sites/">A List Of Text-Only &amp; Minimalist News Sites</a>
+(thanks, greycoder.com).</p>
+
+<h3>U.S. and Global News</h3>
+<ul>
+<li><a href="https://news.kagi.com/">Kagi News</a> - ad-free news digest</li>
+<li><a href="https://concise.news/">Concise News</a> - plain-text headlines</li>
+<li><a href="https://text.npr.org/">NPR News Text Only</a></li>
+<li><a href="https://timef.com/">Timef</a> - headlines from popular sources</li>
+<li><a href="https://brutalist.report/">Brutalist Report</a> - text-only headlines from major outlets</li>
+<li><a href="https://now.otechy.com/">OTechy</a> - text-only news collection</li>
+<li><a href="https://lite.cnn.com/">CNN Text Only</a></li>
+<li><a href="https://www.csmonitor.com/layout/set/text/textedition">Christian Science Monitor Text Only</a></li>
+<li><a href="https://news.lenexia.com/">Lenexia</a> - customizable news aggregator</li>
+<li><a href="https://www.metafilter.com/">Metafilter</a> - community weblog</li>
+</ul>
+
+<h3>Canadian News</h3>
+<ul>
+<li><a href="https://www.cbc.ca/lite/trending">CBC Low Bandwidth</a></li>
+<li><a href="https://www.newsnow.com/ca/">Newsnow (Canada)</a> - headlines</li>
+</ul>
+
+<h3>UK News</h3>
+<ul>
+<li><a href="https://guardian.gyford.com/">Minimalist Today's Guardian</a></li>
+</ul>
+
+<h3>Technology News</h3>
+<ul>
+<li><a href="https://skimfeed.com/news.html">SkimFeed</a> - news aggregator</li>
+<li><a href="https://readspike.com/">Readspike</a> - condensed headlines</li>
+<li><a href="https://www.teahose.com/">Teahose</a> - AI/tech summaries</li>
+<li><a href="https://clone.fyi/">Clone</a> - tech and culture links</li>
+<li><a href="https://hckrnews.com/">Hckr News</a> - condensed Hacker News</li>
+<li><a href="https://news.ycombinator.com/">Hacker News</a></li>
+<li><a href="https://hackerweb.app/">HackerWeb</a> - accessible Hacker News</li>
+<li><a href="https://lobste.rs/">Lobsters</a> - computing links and discussion</li>
+<li><a href="https://alterslash.org/">Alterslash</a> - Slashdot digest</li>
+<li><a href="https://slashdot.org/">Slashdot</a></li>
+<li><a href="https://1mb.club/">1MB Club</a> - web pages under 1 MB</li>
+</ul>
+
+<h3>Science News</h3>
+<ul>
+<li><a href="https://www.sciencedaily.com/">ScienceDaily</a></li>
+</ul>
+
+<h3>Sports News</h3>
+<ul>
+<li><a href="https://allsports.org/">AllSports</a> - plain-text sports results</li>
+<li><a href="https://plaintextsports.com/">PlainTextSports</a></li>
+</ul>
+
+<h3>Wikipedia-Based News</h3>
+<ul>
+<li><a href="https://legiblenews.com/">LegibleNews</a></li>
+<li><a href="https://en.wikipedia.org/wiki/Portal:Current_events">Wikipedia Current Events</a></li>
+<li><a href="https://en.m.wikipedia.org/wiki/Main_Page">Mobile Wikipedia</a></li>
+<li><a href="https://newsasfacts.com/">News As Facts</a></li>
+<li><a href="https://currentevents.email/">Current Events</a> - daily Wikipedia current events</li>
+</ul>
+
+<h3>Weather News</h3>
+<ul>
+<li><a href="https://wttr.in/">wttr.in</a> - text-only weather</li>
+<li><a href="https://www.weather.gov/lwx">National Weather Service</a> - text weather page</li>
+</ul>
+
+<h3>Text-only tools</h3>
+<ul>
+<li><a href="https://www.textise.net/">Textise</a> - text-only version of any page</li>
+</ul>
+
+<p><small>LiteBird home page (about:home). Shortcut: Alt+Home.</small></p>
+</body></html>
+)HOMEPAGE";
+
+// The home page HTML with the two search actions filled in (they are
+// configurable only so the GUI test can point them at its mock server).
+std::string home_page_html(const std::string& ddg_action, const std::string& wiby_action) {
+    std::string h = kHomeHtmlTemplate;
+    auto put = [&h](const char* key, const std::string& v) {
+        size_t p = h.find(key);
+        if (p != std::string::npos) h.replace(p, std::strlen(key), html_escape(v));
+    };
+    put("@DDG@", ddg_action);
+    put("@WIBY@", wiby_action);
+    return h;
+}
+
+// FEAT(5): address-bar search. Words typed in the address bar (anything with
+// a space, or a single word without '.', ':' or '/', except "localhost")
+// search DuckDuckGo Lite instead of being fetched as https://word/.
+// Returns "" when the input should be treated as an address.
+std::string address_bar_search_url(const std::string& raw, const std::string& ddg_action) {
+    std::string s = trim(raw);
+    if (s.empty() || s.find("://") != std::string::npos || is_home_url(s)) return "";
+    bool space = s.find_first_of(" \t") != std::string::npos;
+    bool addr_chars = s.find_first_of(".:/") != std::string::npos;
+    if (!space && (addr_chars || to_lower(s) == "localhost")) return "";
+    std::vector<std::pair<std::string, std::string>> kv{{"q", s}};
+    return form_get_url(ddg_action, form_urlencode(kv));
+}
+
+Page make_home_page(const std::string& token, const std::string& ddg_action, const std::string& wiby_action) {
+    Page pg;
+    pg.url = kHomeUrl;
+    pg.html = prepare_html(home_page_html(ddg_action, wiby_action), pg.url, token, pg.links, pg.forms, pg.refs);
+    return pg;
+}
+
+// FEAT(5): `home=` in the config file overrides the start page (default
+// about:home). Returns "" when not set.
+std::string parse_home_setting(const std::string& cfg) {
+    std::string home;
+    size_t i = 0;
+    if (cfg.compare(0, 3, "\xEF\xBB\xBF") == 0) i = 3;
+    while (i < cfg.size()) {
+        size_t e = cfg.find('\n', i);
+        if (e == std::string::npos) e = cfg.size();
+        std::string l = trim(cfg.substr(i, e - i));
+        i = e + 1;
+        size_t eq = l.find('=');
+        if (l.empty() || l[0] == '#' || l[0] == ';' || eq == std::string::npos) continue;
+        if (to_lower(trim(l.substr(0, eq))) == "home") home = trim(l.substr(eq + 1));
+    }
+    return home;
+}
+
+// ---------------------------------------------------------------------------
 // FEATURE: persisted settings (dark mode). %APPDATA%\LiteBird\config.ini on
 // Windows, $XDG_CONFIG_HOME/litebird/config (default ~/.config) elsewhere.
 // ---------------------------------------------------------------------------
@@ -2087,14 +2257,24 @@ public:
         char buf[32];
         std::snprintf(buf, sizeof(buf), "lb%08x%08x", (unsigned)rd(), (unsigned)rd());
         token_ = buf;
+        // FEAT(5): search targets of the home page / address-bar search. The
+        // environment overrides exist for the GUI test (mock server) only.
+        ddg_url_ = kDefaultDdgLite;
+        wiby_url_ = kDefaultWiby;
+        if (const char* e = std::getenv("LITEBIRD_DDG_LITE_URL")) if (is_http_scheme(e)) ddg_url_ = e;
+        if (const char* e = std::getenv("LITEBIRD_WIBY_URL")) if (is_http_scheme(e)) wiby_url_ = e;
 
         begin();
         // CHANGED: toolbar in its own group with the URL field as the resizable
         // widget; previously the buttons stretched/moved when the window resized.
         bar_ = new Fl_Group(0, 0, w, 44);
-        new Fl_Box(5, 8, 45, 28, "URL:");
-        url_ = new Fl_Input(50, 8, w - 305, 28);
-        url_->value("https://example.com");
+        // FEAT(5): Home button (never takes the focus, like the other toolbar buttons).
+        auto* home = new NoFocusButton(5, 8, 55, 28, "Home");
+        home->callback(cb_home, this);
+        home->tooltip("Home page (Alt+Home)");
+        new Fl_Box(62, 8, 40, 28, "URL:");
+        url_ = new Fl_Input(102, 8, w - 357, 28);
+        url_->value(kHomeUrl);
         url_->when(FL_WHEN_ENTER_KEY_ALWAYS);
         url_->callback(cb_go, this);
         auto* go = new NoFocusButton(w - 250, 8, 55, 28, "Go");  // FIX(4)
@@ -2182,6 +2362,18 @@ public:
     // FIX(2): `post_type` is the Content-Type of `post` ("" = urlencoded).
     void navigate(const std::string& raw, NavMode mode = NavMode::Push, const std::string* post = nullptr,
                   const std::string& post_type = "") {
+        // FEAT(5): the built-in home page is shown synchronously (no network,
+        // no file). It goes through show_page(), so history, Back/Forward,
+        // reload and the page cache treat it like any other page.
+        if (is_home_url(raw)) {
+            ++gen_;
+            reap_jobs(true);  // cancel a load still in flight
+            cursor(FL_CURSOR_DEFAULT);
+            auto pg = std::make_shared<Page>(make_home_page(token_, ddg_url_, wiby_url_));
+            set_url_text(kHomeUrl);  // "litebird:home" / "About:Home " typed -> canonical form
+            show_page(pg, mode);
+            return;
+        }
         std::string err;
         std::string url = normalize_user_url(raw, err);
         if (url.empty()) {  // FIX: invalid input is reported instead of fetched
@@ -2279,6 +2471,7 @@ private:
     Fl_Button* back_;
     Fl_Button* fwd_;
     Fl_Button* theme_btn_;
+    std::string ddg_url_, wiby_url_;     // FEAT(5): home page search actions
     std::vector<HistEntry> hist_;
     int hist_idx_;
     bool insecure_;
@@ -2879,7 +3072,14 @@ private:
     static void cb_go(Fl_Widget*, void* v) {
         auto* self = static_cast<BrowserUI*>(v);
         self->url_claimed_ = false;  // FIX(4): the page gets the focus when it is shown
-        self->navigate(self->url_->value(), NavMode::Push);
+        // FEAT(5): words typed in the address bar search DuckDuckGo Lite.
+        std::string q = address_bar_search_url(self->url_->value(), self->ddg_url_);
+        self->navigate(q.empty() ? std::string(self->url_->value()) : q, NavMode::Push);
+    }
+    static void cb_home(Fl_Widget*, void* v) {  // FEAT(5)
+        auto* self = static_cast<BrowserUI*>(v);
+        self->url_claimed_ = false;
+        self->navigate(kHomeUrl, NavMode::Push);
     }
     static void cb_back(Fl_Widget*, void* v) {
         auto* self = static_cast<BrowserUI*>(v);
@@ -2922,6 +3122,7 @@ private:
         }
         if (k == FL_F + 5 || (ctrl && k == 'r')) { reload(); return true; }
         if (alt && k == FL_Left) { cb_back(nullptr, this); return true; }
+        if (alt && k == FL_Home) { cb_home(nullptr, this); return true; }  // FEAT(5)
         if (alt && k == FL_Right) { cb_fwd(nullptr, this); return true; }
         return false;
     }
@@ -3014,8 +3215,10 @@ void print_usage(const char* argv0) {
               << "  --insecure   disable TLS certificate verification (unsafe)\n"
               << "  --dark       start in dark mode (--light: light mode); not saved\n"
               << "Shortcuts: Ctrl+D dark mode, Ctrl+L address bar, F5/Ctrl+R reload,\n"
-              << "           Alt+Left / Alt+Right back / forward\n"
-              << "Scrolling: PageUp/PageDown, Space/Shift+Space, Up/Down, Home/End\n";  // FIX(4)
+              << "           Alt+Left / Alt+Right back / forward, Alt+Home home page\n"
+              << "Scrolling: PageUp/PageDown, Space/Shift+Space, Up/Down, Home/End\n"  // FIX(4)
+              << "Without a URL the built-in home page (about:home) opens, or home=<url>\n"
+              << "from the config file. Words typed in the address bar search DuckDuckGo Lite.\n";  // FEAT(5)
 }
 
 }  // namespace
@@ -3029,7 +3232,9 @@ int main(int argc, char** argv) {
     // FIX: command-line parsing; argv[1] was always treated as a URL.
     bool insecure = false;
     bool dark = load_dark_setting();  // FEATURE: persisted dark-mode choice
-    std::string start = "https://example.com";
+    // FEAT(5): start page: URL argument > `home=` in the config > about:home.
+    std::string start = parse_home_setting(read_config());
+    if (start.empty()) start = kHomeUrl;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--insecure") insecure = true;

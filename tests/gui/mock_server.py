@@ -11,7 +11,13 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
-        if u.path == "/lite/":
+        if u.path == "/lite/" and "q=" in u.query:  # FEAT(5): GET search from the home page / address bar
+            q = urllib.parse.parse_qs(u.query).get("q", [""])[0]
+            self.send(f"<html><head><title>{q} at DDG GET</title></head><body><h1>DDG GET results for {q}</h1>{FORM % q}</body></html>")
+        elif u.path == "/wiby/":  # FEAT(5): wiby.me-like GET search
+            q = urllib.parse.parse_qs(u.query).get("q", [""])[0]
+            self.send(f"<html><head><title>{q} at wiby</title></head><body><h1>wiby results for {q}</h1></body></html>")
+        elif u.path == "/lite/":
             self.send("<html><head><title>DuckDuckGo</title></head><body><h1>DuckDuckGo</h1>" + FORM % "" + "</body></html>")
         elif u.path == "/l/":
             t = urllib.parse.parse_qs(u.query)["uddg"][0]
