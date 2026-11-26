@@ -52,6 +52,7 @@ This is **not** a full modern browser. It is intentionally minimal so it can boo
   `~/.config/litebird/config`). `--dark` / `--light` override it for one session.
 - Back/Forward show cached pages instantly, so a search results page is not re-submitted.
 - Shortcuts: Ctrl+D dark mode, Ctrl+L address bar, F5 or Ctrl+R reload, Alt+Left/Right back/forward
+- Page scrolling: PageUp/PageDown, Space/Shift+Space, Up/Down, Home/End (and Ctrl+Home/End) scroll the page unless you are typing in a text field; PageUp/PageDown also work from single-line fields. A newly loaded page gets the keyboard focus unless you clicked into the address bar after starting the load or the page has an `autofocus` field. The toolbar buttons never take the focus. The mouse wheel scrolls 40 px per notch anywhere over the page.
 
 Limitations: there is no JavaScript engine (only the simple redirect patterns above are
 recognised), no CSS, no images (they are blocked on purpose), and no file uploads.

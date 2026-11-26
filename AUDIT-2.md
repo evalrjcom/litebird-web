@@ -175,10 +175,36 @@ Every change in `litebird.cpp` is marked `// FIX(2):` (a bug, security issue or 
 
 The tutorial content and the sidebar links are unchanged.
 
+## Follow-up: PageDown intermittently did nothing (FIX(4))
+
+**Report:** on the e34b60f Windows build, PageDown sometimes stopped working, and the user had to click the scrollbar.
+
+**Root cause:** Fl_Help_View (FLTK 1.3.11) has no key handling of its own. PageDown reaches its scrollbar only as a FLTK "shortcut", which happens when the focused widget ignores the key. A single-line `Fl_Input` does not ignore it. With `Fl::OPTION_ARROW_FOCUS` off (the default), it treats PageUp/PageDown/Up/Down as "move the cursor" and reports the key as used, even on a one-line field. The focus was in a text field at exactly the times the user wanted to scroll:
+- at start-up, the address bar is the first focusable widget;
+- after Enter in the address bar, the focus stayed there;
+- after every load, the form bar focused the page's first text field (any page with a search box);
+- clicking the page text or a link did not move the focus, because Fl_Help_View never takes it on a click.
+
+Clicking the scrollbar (or a toolbar button) "fixed" it because those widgets take the focus on a click. That is also why it looked intermittent. Space and the arrow keys had the same problem. After a click on Go/Back/Dark, Space re-pressed that button instead of scrolling. Nothing in our own dispatch/handlers swallowed the keys.
+
+**Fixes:**
+- **Window-level scroll keys:** in the event dispatch, before any widget, PageUp/PageDown, Space/Shift+Space, Up/Down, Home/End and Ctrl+Home/End set the view's `topline()`. A page is the visible height minus one line; an arrow step is 40 px.
+  - PageUp/PageDown work everywhere except a multi-line field.
+  - The other keys work unless a text field or form control has the focus.
+  - Nothing happens while a menu or select popup holds the grab.
+  - The rules are a pure function, `scroll_key_target()`, which is unit-tested.
+- **Focus:** a newly shown page (load, Back/Fwd, error page) gets the focus. Exceptions: the user is typing an address (the FIX(2) no-steal rule), the user clicked into the address bar or pressed Ctrl+L after starting the load, or the page has an `autofocus` field. The form bar no longer focuses the first text field. A click on the page or a link moves the focus to the page.
+- **Toolbar buttons** (`NoFocusButton`) never take the focus. `Fl_Button` grabs the focus on a click whatever the widget's `visible_focus()` says, so `handle(FL_FOCUS)` returns 0.
+- **Mouse wheel** over the page scrolls 40 px per notch (was 16 px).
+- `LITEBIRD_DEBUG_SCROLL=1` logs `LB_SCROLL topline=N focus=…` and `LB_FOCUS shown focus=…` to stderr.
+
+**Tests:** 30 unit assertions for `scroll_key_target()`, and `tests/gui/scroll_keys.sh` with the mock's `/long`, `/long2` and `/longform` pages, 21 checks. On the e34b60f code (with only the debug log added), 13 of the 21 checks fail; with the fix, all 21 pass under the release build, ASan+UBSan and TSan.
+
 ## Files
 - `litebird.cpp`: corrected source, with FIX(2) / CHANGED(2) markers
 - `tests/test_helpers.cpp`: extended unit tests (`make test`)
 - `tests/gui/gui_smoke.sh` and `tests/gui/mock_server.py`: the GUI smoke test (Xvfb + xdotool) and the DDG-like mock server
+- `tests/gui/scroll_keys.sh`: keyboard/wheel scrolling GUI test (FIX(4))
 - `Makefile`, `README.md`: small fixes (items 35 and 36)
 
 The sanitizer run logs and before/after screenshots referenced above were kept out of the repository.
